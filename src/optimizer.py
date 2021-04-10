@@ -23,4 +23,5 @@ class Optimizer:
                 col2 = colocate[i + 1]
                 constraints.append(transmit_matrix[:, col1] == transmit_matrix[:, col2])
         prob = cp.Problem(objective, constraints)
-        return prob.solve(), transmit_matrix.value
+        cost = prob.solve()
+        return cost, transmit_matrix.value

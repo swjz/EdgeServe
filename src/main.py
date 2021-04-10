@@ -45,27 +45,27 @@ def generate_random_data(source_matrix):
 
 def main():
     optimizer = Optimizer()
-    # T = optimizer.solve(S, C, R, V, colocation_list)
-    T = np.array(
-    [[1,0,1],
-     [1,1,1]]
-    )
+    cost, T = optimizer.solve(S, C, R, V, colocation_list)
 
     num_devices = M
     num_data = N
 
     data_dict = generate_random_data(S)
-    print(data_dict)
+    print('Data distribution from source matrix\n', data_dict)
 
     # initialize kafka services
     # a list of strings, has length num_data
     topics = ['data' + str(data_id) for data_id  in range(num_data)]
     group_ids = ['dev' + str(group_id) for group_id in range(num_devices)]
-    # TODO: put data into devices
+
+    # put data into devices
     devices = []
     for group_id in group_ids:
         device = Device(group_id, data_dict[group_id])
         devices.append(device)
+
+    for topic in topics:
+        print(topic, 'has', devices[0].consumer.partitions_for_topic(topic), 'partitions')
 
     routing_matrix = T - S
     subscriber_devices = set()
@@ -82,7 +82,7 @@ def main():
                 devices[idx_device].publish(topic)
 
     for idx_device in subscriber_devices:
-        devices[idx_device].read_messages()
+        devices[idx_device].handle_messages()
 
 if __name__ == '__main__':
     main()

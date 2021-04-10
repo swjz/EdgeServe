@@ -1,3 +1,4 @@
+import requests
 from kafka import KafkaProducer, KafkaConsumer
 
 class Device:
@@ -18,6 +19,7 @@ class Device:
         self.consumer = KafkaConsumer(
             bootstrap_servers=['localhost:9092'],
             # group_id=group_id,
+            # without the two following lines, the consumer hangs when consuming messages
             group_id=None,
             auto_offset_reset='earliest',
             value_deserializer=lambda x: x.decode('utf-8'),
@@ -32,14 +34,19 @@ class Device:
         self.consumer.subscribe(topic)
         print(self.group_id, 'has subscribed to', topic)
 
-    def read_messages(self):
+    def handle_messages(self):
         # call this only after subscribing to something
-        # TODO: refactor
         print(self.group_id, 'is reading stuff')
         for message in self.consumer:
-            print ("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition,
+            print("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition,
                                           message.offset, message.key,
                                           message.value))
+            # TODO: connect to model serving REST API
+            # url = 'http://127.0.0.1:8080/predictions/densenet161'
+            # files = {'file': open('../../kitten_small.jpg', 'rb')}
+            # r = requests.post(url, files=files)
+            r = requests.post('http://localhost:8080/ping')
+            print(r.text)
 
     def unsubscribe(self):
         self.consumer.unsubscribe()
