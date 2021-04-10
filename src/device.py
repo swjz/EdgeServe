@@ -24,6 +24,7 @@ class Device:
             auto_offset_reset='earliest',
             value_deserializer=lambda x: x.decode('utf-8'),
             request_timeout_ms=1000,
+            consumer_timeout_ms=1000,
             )
         self.data = data
 
