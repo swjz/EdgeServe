@@ -18,23 +18,24 @@ class Device:
             )
         self.consumer = KafkaConsumer(
             bootstrap_servers=['localhost:9092'],
-            # group_id=group_id,
-            # without the two following lines, the consumer hangs when consuming messages
-            group_id=None,
+            group_id=group_id,
             auto_offset_reset='earliest',
+            enable_auto_commit=True,
             value_deserializer=lambda x: x.decode('utf-8'),
-            request_timeout_ms=1000,
             consumer_timeout_ms=1000,
             )
         self.data = data
+        self.subscribed_topics = set()
 
     def publish(self, topic):
         self.producer.send(topic, self.data[topic])
         print(self.group_id, 'sent', self.data[topic], 'to', topic)
 
     def subscribe(self, topic):
-        self.consumer.subscribe(topic)
-        print(self.group_id, 'has subscribed to', topic)
+        self.consumer.unsubscribe()
+        self.subscribed_topics.add(topic)
+        self.consumer.subscribe(self.subscribed_topics)
+        print(self.group_id, 'has subscribed to', self.subscribed_topics)
 
     def handle_messages(self):
         # call this only after subscribing to something
@@ -51,5 +52,13 @@ class Device:
             print(r.text)
         self.consumer.close()
 
-    def unsubscribe(self):
+    def unsubscribe(self, topic):
+        if topic not in self.subscribed_topics:
+            print("ERROR: Unable to unsubscribe -- topic '%s' does not exist." % topic)
+            return
+        self.subscribed_topics.remove(topic)
+        self.consumer.subscribe(self.subscribed_topics) # subscribe the remaining topics
+
+    def unsubscribe_all(self):
         self.consumer.unsubscribe()
+        self.subscribed_topics = set()
