@@ -23,6 +23,7 @@ class Device:
             group_id=None,
             auto_offset_reset='earliest',
             value_deserializer=lambda x: x.decode('utf-8'),
+            request_timeout_ms=1000,
             )
         self.data = data
 
@@ -47,6 +48,7 @@ class Device:
             # r = requests.post(url, files=files)
             r = requests.post('http://localhost:8080/ping')
             print(r.text)
+        self.consumer.close()
 
     def unsubscribe(self):
         self.consumer.unsubscribe()

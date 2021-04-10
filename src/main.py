@@ -18,6 +18,18 @@ V = np.array([20,30])
 R = np.array([2,1,2])
 colocation_list = [[0, 2]]
 
+# a second toy example
+M = 4
+N = 7
+S = np.array([[1, 1, 0, 0, 0, 0, 0],
+     [0, 0, 1, 1, 0, 0, 0],
+     [0, 0, 0, 0, 1, 1, 0],
+     [0, 0, 0, 0, 0, 0, 1]])
+C = np.array([100, 10, 100, 10, 100, 10, 15])
+V = np.array([350, 350, 350, 15])
+R = np.array([3, 3, 3, 3, 3, 3, 3])
+colocation_list = [[0, 1], [2, 3], [4, 5]]
+
 def generate_random_inputs(num_devices, num_data):
     S = np.random.randint(0, 2, (M, N))
     C = np.random.randint(10, 21, N)
