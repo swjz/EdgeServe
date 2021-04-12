@@ -45,6 +45,9 @@ def generate_random_data(source_matrix):
     """
     generate a data dictionary {dev0: {data0: }}
     """
+    with open('/home/azureuser/kitten_small.jpg', 'rb') as file:
+        kitten_file = file.read()
+
     ret = defaultdict(dict)
     num_devices, num_data = source_matrix.shape
     for idx_device in range(num_devices):
@@ -52,7 +55,8 @@ def generate_random_data(source_matrix):
         for idx_data in range(num_data):
             if source_matrix[idx_device, idx_data] == 1:
                 key_data = 'data' + str(idx_data)
-                ret[key_device][key_data] = str(np.random.randint(1000))
+                #ret[key_device][key_data] = str(np.random.randint(1000))
+                ret[key_device][key_data] = kitten_file
     return ret
 
 def main():
@@ -63,7 +67,7 @@ def main():
     num_data = N
 
     data_dict = generate_random_data(S)
-    print('Data distribution from source matrix\n', data_dict)
+#    print('Data distribution from source matrix\n', data_dict)
 
     # initialize kafka services
     # a list of strings, has length num_data

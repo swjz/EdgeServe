@@ -13,23 +13,23 @@ class Device:
         """
         self.group_id = group_id
         self.producer = KafkaProducer(
-            bootstrap_servers=['localhost:9092'],
-            value_serializer=lambda x: x.encode('utf-8'),
+            bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
+            # value_serializer=lambda x: x.encode('utf-8'),
             )
         self.consumer = KafkaConsumer(
-            bootstrap_servers=['localhost:9092'],
+            bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092']
             group_id=group_id,
             auto_offset_reset='earliest',
             enable_auto_commit=True,
-            value_deserializer=lambda x: x.decode('utf-8'),
-            consumer_timeout_ms=1000,
+            # value_deserializer=lambda x: x.decode('utf-8'),
+            # consumer_timeout_ms=1000,
             )
         self.data = data
         self.subscribed_topics = set()
 
     def publish(self, topic):
         self.producer.send(topic, self.data[topic])
-        print(self.group_id, 'sent', self.data[topic], 'to', topic)
+        # print(self.group_id, 'sent', self.data[topic], 'to', topic)
 
     def subscribe(self, topic):
         self.consumer.unsubscribe()
@@ -41,14 +41,14 @@ class Device:
         # call this only after subscribing to something
         print(self.group_id, 'is reading stuff')
         for message in self.consumer:
-            print("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition,
-                                          message.offset, message.key,
-                                          message.value))
+            # print("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition,
+            #                              message.offset, message.key,
+            #                              message.value))
             # TODO: connect to model serving REST API
-            # url = 'http://127.0.0.1:8080/predictions/densenet161'
+            url = 'http://127.0.0.1:8080/predictions/densenet161'
             # files = {'file': open('../../kitten_small.jpg', 'rb')}
-            # r = requests.post(url, files=files)
-            r = requests.post('http://localhost:8080/ping')
+            r = requests.post(url, data=message.value)
+            # r = requests.post('http://localhost:8080/ping')
             print(r.text)
         self.consumer.close()
 
