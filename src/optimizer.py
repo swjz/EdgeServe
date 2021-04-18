@@ -15,7 +15,6 @@ class Optimizer:
         self.consumer = KafkaConsumer(
             TOPIC_STATUS,
             bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
-            group_id=group_id,
             auto_offset_reset='earliest',
             enable_auto_commit=True,
             # consumer_timeout_ms=1000,

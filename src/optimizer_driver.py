@@ -1,3 +1,5 @@
+import numpy as np
+
 from optimizer import Optimizer
 
 # toy example for 2 devices
@@ -42,19 +44,15 @@ def main():
         for idx_device in range(num_devices):
             if routing_matrix[idx_device, idx_data] == 1:
                 # send message thru the STATUS channel telling device to subscribe
-                optimizer.notify_publish(group_ids[idx_device], topic)
+                optimizer.notify_subscribe(group_ids[idx_device], topic)
                 subscriber_devices.add(idx_device)
         # locate one device that has the data at S
         for idx_device in range(num_devices):
             if source_matrix[idx_device, idx_data] == 1:
                 # send message thru the STATUS channel telling device to publish
-                devices[idx_device].publish(topic)
+                optimizer.notify_publish(group_ids[idx_device], topic)
 
-    # send message thru the STATUS channel telling device to read
-    for idx_device in subscriber_devices:
-        devices[idx_device].handle_messages()
-
-    # optimizer and spin, listen to device status report from STATUS
+    # optimizer should spin, listen to device status report from STATUS
     # and dynamically re-solve the optimzation problem
 
 
