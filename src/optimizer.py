@@ -10,7 +10,6 @@ class Optimizer:
     """
     def __init__(self):
         self.producer = KafkaProducer(
-            TOPIC_STATUS,
             bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
             )
         self.consumer = KafkaConsumer(

@@ -16,7 +16,6 @@ class Device:
         """
         self.group_id = group_id
         self.producer = KafkaProducer(
-            TOPIC_STATUS,
             bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
             )
         self.consumer = KafkaConsumer(
@@ -29,6 +28,8 @@ class Device:
             )
         self.data = data
         self.subscribed_topics = set([TOPIC_STATUS])
+
+    # TODO: let device publish to TOPIC_STATUS
 
     def publish(self, topic):
         self.producer.send(topic, self.data[topic])
