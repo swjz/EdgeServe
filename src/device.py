@@ -1,5 +1,8 @@
+import json
 import requests
 from kafka import KafkaProducer, KafkaConsumer
+
+from constants import *
 
 class Device:
 
@@ -13,19 +16,19 @@ class Device:
         """
         self.group_id = group_id
         self.producer = KafkaProducer(
+            TOPIC_STATUS,
             bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
-            # value_serializer=lambda x: x.encode('utf-8'),
             )
         self.consumer = KafkaConsumer(
+            TOPIC_STATUS,
             bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092']
             group_id=group_id,
             auto_offset_reset='earliest',
             enable_auto_commit=True,
-            # value_deserializer=lambda x: x.decode('utf-8'),
             # consumer_timeout_ms=1000,
             )
         self.data = data
-        self.subscribed_topics = set()
+        self.subscribed_topics = set([TOPIC_STATUS])
 
     def publish(self, topic):
         self.producer.send(topic, self.data[topic])
@@ -45,12 +48,28 @@ class Device:
             #                              message.offset, message.key,
             #                              message.value))
             # TODO: connect to model serving REST API
-            url = 'http://127.0.0.1:8080/predictions/densenet161'
-            # files = {'file': open('../../kitten_small.jpg', 'rb')}
-            r = requests.post(url, data=message.value)
-            # r = requests.post('http://localhost:8080/ping')
-            print(r.text)
-        self.consumer.close()
+
+            # check if message is from STATUS or is a data message
+            print('Topic', message.topic, type(message.topic), 'key', message.key, type(message.key))
+            # ignore it a message from STATUS is not directed to my group_id
+            if message.topic == STATUS and message.key == group_id:
+                self.handle_status_topic(message)
+            else:
+                # make predictions
+                # TODO: refactor into a method
+                url = 'http://127.0.0.1:8080/predictions/densenet161'
+                response = requests.post(url, data=message.value)
+                print('Got prediction', json.dumps(response.text))
+        # don't close the consumer since we still need status updates
+        # self.consumer.close()
+
+    def handle_status_topic(self, message):
+        print('Inside handle_status_topic', message.value)
+        action, topic = message.value.decode('utf-8').split('_')
+        if action == KEY_SUBSCRIBE:
+            self.subscribe(topic)
+        elif action == KEY_PUBLISH:
+            self.publish(topic)
 
     def unsubscribe(self, topic):
         if topic not in self.subscribed_topics:
@@ -61,4 +80,4 @@ class Device:
 
     def unsubscribe_all(self):
         self.consumer.unsubscribe()
-        self.subscribed_topics = set()
+        self.subscribed_topics = set([TOPIC_STATUS])

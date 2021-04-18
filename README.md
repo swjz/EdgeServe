@@ -1,3 +1,13 @@
+# Azuer, `azure_test`
+
+```
+python device_driver.py dev0
+python device_driver.py dev1
+python optimizer_driver.py
+```
+
+# Local, `master`
+
 ```
 pip install cvxpy
 pip install cvxopt
