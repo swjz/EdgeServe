@@ -11,7 +11,8 @@ def main():
         kitten_file = file.read()
     # TODO: group_id should also be loaded from file
     # clarification on the usage of group_id?
-    group_id = sys.arg
+    group_id = sys.argv[1]
+    print('Initialize device', group_id)
     device = Device(group_id, kitten_file)
 
     # at this point the device should be spinning in a loop

@@ -1,10 +1,10 @@
 # Azuer, `azure_test`
 
 ```
-pip install numpy cvxpy cvxopt kafka-python
-python device_driver.py dev0
-python device_driver.py dev1
-python optimizer_driver.py
+pip3 install numpy cvxpy cvxopt kafka-python
+python3 device_driver.py dev0
+python3 device_driver.py dev1
+python3 optimizer_driver.py
 ```
 
 # Local, `master`
