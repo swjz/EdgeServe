@@ -52,10 +52,11 @@ class Device:
 
             # check if message is from STATUS or is a data message
             # ignore it a message from STATUS is not directed to my group_id
-            if message.topic == TOPIC_STATUS and message.key.decode('utf-8') == self.group_id:
-                print('Topic', message.topic, type(message.topic),
-                      'key', message.key.decode('utf-8'), type(message.key.decode('utf-8')))
-                self.handle_status_topic(message)
+            if message.topic == TOPIC_STATUS:
+                if message.key.decode('utf-8') == self.group_id:
+                    print('Topic', message.topic, type(message.topic),
+                          'key', message.key.decode('utf-8'), type(message.key.decode('utf-8')))
+                    self.handle_status_topic(message)
             else:
                 # make predictions
                 # TODO: refactor into a method
