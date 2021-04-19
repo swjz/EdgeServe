@@ -13,7 +13,7 @@ def main():
     # clarification on the usage of group_id?
     group_id = sys.argv[1]
     print('Initialize device', group_id)
-    device = Device(group_id, kitten_file)
+    device = Device(group_id, {'data0': kitten_file, 'data1': kitten_file, 'data2': kitten_file})
 
     # at this point the device should be spinning in a loop
     # publishing, subscribing, and reading
