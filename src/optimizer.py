@@ -10,11 +10,11 @@ class Optimizer:
     """
     def __init__(self):
         self.producer = KafkaProducer(
-            bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
+            bootstrap_servers=['ted-driver:9092'],
             )
         self.consumer = KafkaConsumer(
             TOPIC_STATUS,
-            bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
+            bootstrap_servers=['ted-driver:9092'],
             auto_offset_reset='earliest',
             enable_auto_commit=True,
             # consumer_timeout_ms=1000,

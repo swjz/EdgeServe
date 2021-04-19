@@ -16,11 +16,11 @@ class Device:
         """
         self.group_id = group_id
         self.producer = KafkaProducer(
-            bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
+            bootstrap_servers=['ted-driver:9092'],
             )
         self.consumer = KafkaConsumer(
             TOPIC_STATUS,
-            bootstrap_servers=['ted-driver:9092', 'ted-worker1:9092', 'ted-worker2:9092'],
+            bootstrap_servers=['ted-driver:9092'],
             group_id=group_id,
             auto_offset_reset='earliest',
             enable_auto_commit=True,
@@ -51,9 +51,10 @@ class Device:
             # TODO: connect to model serving REST API
 
             # check if message is from STATUS or is a data message
-            print('Topic', message.topic, type(message.topic), 'key', message.key, type(message.key))
+            print('Topic', message.topic, type(message.topic),
+                  'key', message.key.decode('utf-8'), type(message.key.decode('utf-8')))
             # ignore it a message from STATUS is not directed to my group_id
-            if message.topic == TOPIC_STATUS and message.key == self.group_id:
+            if message.topic == TOPIC_STATUS and message.key.decode('utf-8') == self.group_id:
                 self.handle_status_topic(message)
             else:
                 # make predictions
