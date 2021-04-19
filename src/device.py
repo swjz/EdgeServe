@@ -53,7 +53,7 @@ class Device:
             # check if message is from STATUS or is a data message
             print('Topic', message.topic, type(message.topic), 'key', message.key, type(message.key))
             # ignore it a message from STATUS is not directed to my group_id
-            if message.topic == STATUS and message.key == group_id:
+            if message.topic == TOPIC_STATUS and message.key == group_id:
                 self.handle_status_topic(message)
             else:
                 # make predictions
