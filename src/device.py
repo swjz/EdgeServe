@@ -51,10 +51,10 @@ class Device:
             # TODO: connect to model serving REST API
 
             # check if message is from STATUS or is a data message
-            print('Topic', message.topic, type(message.topic),
-                  'key', message.key.decode('utf-8'), type(message.key.decode('utf-8')))
             # ignore it a message from STATUS is not directed to my group_id
             if message.topic == TOPIC_STATUS and message.key.decode('utf-8') == self.group_id:
+                print('Topic', message.topic, type(message.topic),
+                      'key', message.key.decode('utf-8'), type(message.key.decode('utf-8')))
                 self.handle_status_topic(message)
             else:
                 # make predictions
