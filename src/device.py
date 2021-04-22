@@ -36,6 +36,8 @@ class Device:
         # print(self.group_id, 'sent', self.data[topic], 'to', topic)
 
     def subscribe(self, topic):
+        if topic in self.subscribed_topics:  # avoid repeated subscription
+            return
         self.consumer.unsubscribe()
         self.subscribed_topics.add(topic)
         self.consumer.subscribe(self.subscribed_topics)
