@@ -6,7 +6,7 @@ from constants import *
 
 class Device:
 
-    def __init__(self, group_id, data):
+    def __init__(self, group_id, data, predict_func=None):
         """
         group_no: kafka group id, different so that different devices/consumers
         can get the same message from the publisher
@@ -28,6 +28,9 @@ class Device:
             )
         self.data = data
         self.subscribed_topics = set([TOPIC_STATUS])
+        self.predict_func = predict_func
+        if self.predict_func:
+            assert callable(self.predict_func)
 
     # TODO: let device publish to TOPIC_STATUS
 
@@ -42,6 +45,10 @@ class Device:
         self.subscribed_topics.add(topic)
         self.consumer.subscribe(self.subscribed_topics)
         print(self.group_id, 'has subscribed to', self.subscribed_topics)
+
+    def set_predict_func(self, predict_func):
+        assert callable(predict_func)
+        self.predict_func = predict_func
 
     def handle_messages(self):
         # call this only after subscribing to something
@@ -61,10 +68,10 @@ class Device:
                     self.handle_status_topic(message)
             else:
                 # make predictions
-                # TODO: refactor into a method
-                url = 'http://127.0.0.1:8080/predictions/densenet161'
-                response = requests.post(url, data=message.value)
-                print('Got prediction', json.dumps(response.text))
+                if not self.predict_func:
+                    raise ValueError("We need a user-defined function to make predictions.")
+                result = self.predict_func(message.value)
+                print('Got prediction', result)
         # don't close the consumer since we still need status updates
         # self.consumer.close()
 
