@@ -1,7 +1,7 @@
 import json
 import requests
 from kafka import KafkaProducer, KafkaConsumer
-
+from time import time
 from constants import *
 
 class Device:
@@ -17,6 +17,7 @@ class Device:
         self.group_id = group_id
         self.producer = KafkaProducer(
             bootstrap_servers=['ted-driver:9092'],
+            max_request_size=104857600,
             )
         self.consumer = KafkaConsumer(
             TOPIC_STATUS,
@@ -24,6 +25,7 @@ class Device:
             group_id=group_id,
             auto_offset_reset='earliest',
             enable_auto_commit=True,
+            fetch_max_bytes=104857600,
             # consumer_timeout_ms=1000,
             )
         self.data = data
@@ -35,7 +37,9 @@ class Device:
     # TODO: let device publish to TOPIC_STATUS
 
     def publish(self, topic):
+        begin = time()
         self.producer.send(topic, self.data[topic])
+        print("Time to publish:", time() - begin)
         # print(self.group_id, 'sent', self.data[topic], 'to', topic)
 
     def subscribe(self, topic):
