@@ -35,19 +35,44 @@ def video_detect(file):
     return stdout
 
 
-def main():
-    if not len(sys.argv) > 1:
-        print('Usage example: device_driver.py dev0')
-    # TODO: can pass an argument to a JSON file to read in device data
-    # for now use kitten data
-    with open('/home/azureuser/bklyn_1stream.mp4', 'rb') as file:
-        video = file.read()
+def image_detect(file):
+    begin = time()
+    f = open("image.jpg", "wb")
+    f.write(file)
+    f.close()
+    print("Time for writing this image file to disk:", time() - begin)
+    process = subprocess.Popen(['python3', '/local/swjz/yolov5/detect.py', '--source', 'image.jpg', '--weights', '/local/swjz/yolov5/yolov5x6.pt'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    print(stderr)
+    print("Per frame latency:", time()-begin)
+    return stdout
+
+
+def main(compressed=False):
+    if not len(sys.argv) > 2:
+        print('Usage example: device_driver.py dev0 video.mp4')
     # TODO: group_id should also be loaded from file
     # clarification on the usage of group_id?
     group_id = sys.argv[1]
+    filename = sys.argv[2]
     print('Initialize device', group_id)
-    device = Device(group_id, {'data0': video})
-    device.set_predict_func(video_detect)
+    if compressed:
+        with open(filename, 'rb') as file:
+            video = file.read()
+        device = Device(group_id, {'data0': video})
+        device.set_predict_func(video_detect)
+    else:
+        video = cv2.VideoCapture(filename)
+        list_imgs = []
+        while video.isOpened():
+            success, frame = video.read()
+            if not success:
+                raise ValueError("Video file corrupted")
+            ret, buffer = cv2.imencode('.jpg', frame)
+            list_imgs.append(buffer)
+        device = Device(group_id, {'data0': list_imgs})
+        device.set_predict_func(image_detect)
 
     # at this point the device should be spinning in a loop
     # publishing, subscribing, and reading

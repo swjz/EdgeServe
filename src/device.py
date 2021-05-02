@@ -1,4 +1,6 @@
 import json
+from collections.abc import Iterable
+
 import requests
 from kafka import KafkaProducer, KafkaConsumer
 from time import time
@@ -38,7 +40,12 @@ class Device:
 
     def publish(self, topic):
         begin = time()
-        self.producer.send(topic, self.data[topic])
+        assert topic in self.data
+        if isinstance(self.data[topic], Iterable):
+            for data in self.data[topic]:
+                self.producer.send(topic, data)
+        else:
+            self.producer.send(topic, self.data[topic])
         print("Time to publish:", time() - begin)
         # print(self.group_id, 'sent', self.data[topic], 'to', topic)
 
