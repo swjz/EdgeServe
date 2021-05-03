@@ -63,15 +63,15 @@ def main(compressed=False):
         device = Device(group_id, {'data0': video})
         device.set_predict_func(video_detect)
     else:
-        video = cv2.VideoCapture(filename)
-        list_imgs = []
-        while video.isOpened():
-            success, frame = video.read()
-            if not success:
-                raise ValueError("Video file corrupted")
-            ret, buffer = cv2.imencode('.jpg', frame)
-            list_imgs.append(buffer)
-        device = Device(group_id, {'data0': list_imgs})
+        def imgs():
+            video = cv2.VideoCapture(filename)
+            while video.isOpened():
+                success, frame = video.read()
+                if not success:
+                    raise ValueError("Video file corrupted")
+                ret, buffer = cv2.imencode('.jpg', frame)
+                yield buffer
+        device = Device(group_id, {'data0': imgs()})
         device.set_predict_func(image_detect)
 
     # at this point the device should be spinning in a loop
