@@ -7,7 +7,7 @@ import sys
 import subprocess
 
 
-def hand_detect(file):
+def hand_detect(file, model):
     f = open("hand.jpg", "wb")
     f.write(file)
     f.close()
@@ -21,7 +21,7 @@ def hand_detect(file):
         return results
 
 
-def video_detect(file):
+def video_detect(file, model):
     begin = time()
     f = open("video.mp4", "wb")
     f.write(file)
@@ -35,18 +35,15 @@ def video_detect(file):
     return stdout
 
 
-def image_detect(file):
+def image_detect(file, model):
     begin = time()
     f = open("image.jpg", "wb")
     f.write(file)
     f.close()
     print("Time for writing this image file to disk:", time() - begin)
-    process = subprocess.Popen(['python3', '/local/swjz/yolov5/detect.py', '--source', 'image.jpg', '--weights', '/local/swjz/yolov5/yolov5x6.pt'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    print(stderr)
+    result = model("image.jpg")
     print("Per frame latency:", time()-begin)
-    return stdout
+    return result
 
 
 def main(compressed=False):
@@ -78,6 +75,7 @@ def main(compressed=False):
     # publishing, subscribing, and reading
     # TODO: reading data blocks publishing?
     device.handle_messages()
+
 
 if __name__ == '__main__':
     main()

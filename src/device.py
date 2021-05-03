@@ -1,8 +1,7 @@
-import json
 from collections.abc import Iterable
 
-import requests
 from kafka import KafkaProducer, KafkaConsumer
+import torch
 from time import time
 from constants import *
 
@@ -81,7 +80,8 @@ class Device:
                 # make predictions
                 if not self.predict_func:
                     raise ValueError("We need a user-defined function to make predictions.")
-                result = self.predict_func(message.value)
+                model = torch.hub.load('ultralytics/yolov5', 'yolov5x6')
+                result = self.predict_func(message.value, model)
                 print('Got prediction', result)
         # don't close the consumer since we still need status updates
         # self.consumer.close()
