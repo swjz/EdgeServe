@@ -68,9 +68,9 @@ def main(compressed=False):
             while video.isOpened():
                 success, frame = video.read()
                 if not success:
-                    raise ValueError("Video file corrupted")
+                    break
                 ret, buffer = cv2.imencode('.jpg', frame)
-                yield buffer
+                yield buffer.tobytes()
         device = Device(group_id, {'data0': imgs()})
         device.set_predict_func(image_detect)
 
