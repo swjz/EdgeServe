@@ -63,6 +63,8 @@ class Device:
     def handle_messages(self):
         # call this only after subscribing to something
         print(self.group_id, 'is reading stuff')
+        begin = time()
+        model = torch.hub.load('ultralytics/yolov5', 'yolov5x6')
         for message in self.consumer:
             # print("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition,
             #                              message.offset, message.key,
@@ -80,9 +82,10 @@ class Device:
                 # make predictions
                 if not self.predict_func:
                     raise ValueError("We need a user-defined function to make predictions.")
-                model = torch.hub.load('ultralytics/yolov5', 'yolov5x6')
                 result = self.predict_func(message.value, model)
                 print('Got prediction', result)
+            print("Time spent for this iteration:", time() - begin)
+            begin = time()
         # don't close the consumer since we still need status updates
         # self.consumer.close()
 
