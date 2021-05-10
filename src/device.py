@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterable
 
 from kafka import KafkaProducer, KafkaConsumer
@@ -19,6 +20,7 @@ class Device:
         self.producer = KafkaProducer(
             bootstrap_servers=['ted-driver:9092'],
             max_request_size=104857600,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
         self.consumer = KafkaConsumer(
             TOPIC_STATUS,
@@ -28,6 +30,7 @@ class Device:
             enable_auto_commit=True,
             fetch_max_bytes=104857600,
             # consumer_timeout_ms=1000,
+            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
             )
         self.data = data
         self.subscribed_topics = set([TOPIC_STATUS])
@@ -37,12 +40,18 @@ class Device:
 
     # TODO: let device publish to TOPIC_STATUS
 
-    def publish(self, topic):
+    def publish(self, topic, batch_size=1):
         begin = time()
         assert topic in self.data
         if isinstance(self.data[topic], Iterable):
+            cache = []
             for data in self.data[topic]:
-                self.producer.send(topic, data)
+                cache.append(data)
+                if len(cache) >= batch_size:
+                    self.producer.send(topic, cache)
+                    cache = []
+            if len(cache) > 0:
+                self.producer.send(topic, cache)
         else:
             self.producer.send(topic, self.data[topic])
         print("Time to publish:", time() - begin)
