@@ -35,6 +35,20 @@ def video_detect(file, model):
     return stdout
 
 
+def images_detect(files, model):
+    begin = time()
+    imgs_list = []
+    for i, img in enumerate(files):
+        f = open("image"+str(i)+".jpg", "wb")
+        f.write(img)
+        f.close()
+        imgs_list.append("image"+str(i)+".jpg")
+    print("Time for writing this image file to disk:", time() - begin)
+    result = model(imgs_list)
+    print("Per frame latency:", time()-begin)
+    return result
+
+
 def image_detect(file, model):
     begin = time()
     f = open("image.jpg", "wb")
@@ -43,6 +57,22 @@ def image_detect(file, model):
     print("Time for writing this image file to disk:", time() - begin)
     result = model("image.jpg")
     print("Per frame latency:", time()-begin)
+    return result
+
+
+def video_detect_opencv(file, model):
+    begin = time()
+    f = open("video.mp4", "wb")
+    f.write(file)
+    f.close()
+    print("Time for writing video file to disk:", time() - begin)
+    video = cv2.VideoCapture("video.mp4")
+    result = []
+    while video.isOpened():
+        success, frame = video.read()
+        if not success:
+            break
+        result.append(model(frame))
     return result
 
 
@@ -68,7 +98,31 @@ def main(compressed=False):
                     break
                 ret, buffer = cv2.imencode('.jpg', frame)
                 yield buffer.tobytes()
-        device = Device(group_id, {'data0': imgs()})
+
+        def batch_imgs(batch_size=1):
+            video = cv2.VideoCapture(filename)
+            fps = video.get(cv2.CAP_PROP_FPS)
+            fourcc = video.get(cv2.CAP_PROP_FOURCC)
+            height = video.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            width = video.get(cv2.CAP_PROP_FRAME_WIDTH)
+            cache = []
+            begin = time()
+            while video.isOpened():
+                success, frame = video.read()
+                if not success:
+                    break
+                cache.append(frame)
+                if len(cache) >= batch_size:
+                    out = cv2.VideoWriter('batch.mp4', fourcc, fps, (width, height))
+                    for frame in cache:
+                        out.write(frame)
+                    out.release()
+                    f = open("batch.mp4", "rb")
+                    buffer = f.read()
+                    print("Time to encode batch mp4:", time() - begin)
+                    begin = time()
+                    yield buffer
+        device = Device(group_id, {'data0': batch_imgs()})
         device.set_predict_func(image_detect)
 
     # at this point the device should be spinning in a loop
