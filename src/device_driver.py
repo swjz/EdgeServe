@@ -73,6 +73,7 @@ def video_detect_opencv(file, model):
         if not success:
             break
         result.append(model(frame))
+    print("Compute cost:", time() - begin)
     return result
 
 
@@ -102,9 +103,9 @@ def main(compressed=False):
         def batch_imgs(batch_size=1):
             video = cv2.VideoCapture(filename)
             fps = video.get(cv2.CAP_PROP_FPS)
-            fourcc = video.get(cv2.CAP_PROP_FOURCC)
-            height = video.get(cv2.CAP_PROP_FRAME_HEIGHT)
-            width = video.get(cv2.CAP_PROP_FRAME_WIDTH)
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
             cache = []
             begin = time()
             while video.isOpened():
@@ -117,8 +118,10 @@ def main(compressed=False):
                     for frame in cache:
                         out.write(frame)
                     out.release()
+                    cache = []
                     f = open("batch.mp4", "rb")
                     buffer = f.read()
+                    f.close()
                     print("Time to encode batch mp4:", time() - begin)
                     begin = time()
                     yield buffer
