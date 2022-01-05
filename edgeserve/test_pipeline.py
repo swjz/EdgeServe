@@ -7,8 +7,11 @@ class TestPipeline():
     def test_pipeline(self):
         node = 'pulsar://swjz-nuc2:6650'
         s = 'hello'
-        with DataSource(stream=s, pulsar_node=node) as data_source, Compute(task=lambda x: x*2, pulsar_node=node) as compute, Materialize(print, pulsar_node=node) as materialize:
-            for _ in s:
-                next(data_source)
-                next(compute)
-                next(materialize)
+        task = lambda x: x*2
+        with DataSource(stream=s, pulsar_node=node) as data_source,\
+                Compute(task=task, pulsar_node=node) as compute,\
+                Materialize(lambda x: x, pulsar_node=node) as materialize:
+            for l in s:
+                assert next(data_source) == l.encode('utf-8')
+                assert next(compute) == task(l).encode('utf-8')
+                assert next(materialize) == task(l)

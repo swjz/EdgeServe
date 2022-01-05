@@ -18,8 +18,6 @@ class DataSource:
         return self
 
     def __next__(self):
-        data = next(self.stream)
-        if self.gate is not None:
-            data = self.gate(data)
+        data = self.gate(next(self.stream))
         self.producer.send(data)
-
+        return data

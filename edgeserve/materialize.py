@@ -6,7 +6,7 @@ class Materialize:
         self.client = pulsar.Client(pulsar_node)
         self.consumer = self.client.subscribe(topic, subscription_name='my-sub')
         self.materialize = materialize
-        self.gate = lambda x: x if gate is None else gate
+        self.gate = lambda x: x.decode('utf-8') if gate is None else gate
 
     def __enter__(self):
         return self
@@ -19,10 +19,8 @@ class Materialize:
 
     def __next__(self):
         msg = self.consumer.receive()
-        if self.gate is not None:
-            data = self.gate(msg.data())
+        data = self.gate(msg.data())
+        output = self.materialize(data)
+
         self.consumer.acknowledge(msg)
-
-        self.materialize(data)
-
-
+        return output

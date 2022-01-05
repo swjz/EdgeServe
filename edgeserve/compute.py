@@ -21,8 +21,9 @@ class Compute:
     def __next__(self):
         msg = self.consumer.receive()
         data = self.gate(msg.data())
-        self.consumer.acknowledge(msg)
 
         output = self.task(data)
         self.producer.send(output)
 
+        self.consumer.acknowledge(msg)
+        return output
