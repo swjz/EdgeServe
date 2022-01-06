@@ -1,34 +1,35 @@
 from compute import Compute
 from data_source import DataSource
 from materialize import Materialize
+import pytest
 
 
-class TestPipeline():
-    def test_pipeline(self):
-        node = 'pulsar://localhost:6650'
-        stream = 'hello'
-        task = lambda x: x*2
-        with DataSource(stream, node) as data_source,\
-                Compute(task, node) as compute,\
-                Materialize(lambda x: x, node) as materialize:
-            for l in stream:
-                assert next(data_source) == l.encode('utf-8')
-                assert next(compute) == task(l).encode('utf-8')
-                assert next(materialize) == task(l)
+@pytest.fixture()
+def data():
+    return {'node': 'pulsar://localhost:6650',
+            'stream': 'hello',
+            'task': lambda x: x*2}
 
+def test_pipeline(data):
+    with DataSource(data['stream'], data['node']) as data_source,\
+            Compute(data['task'], data['node']) as compute,\
+            Materialize(lambda x: x, data['node']) as materialize:
+        for letter in data['stream']:
+            assert next(data_source) == letter.encode('utf-8')
+            assert next(compute) == data['task'](letter).encode('utf-8')
+            assert next(materialize) == data['task'](letter)
 
-    def test_pipeline_separate(self):
-        node = 'pulsar://localhost:6650'
-        stream = 'hello'
-        task = lambda x: x*2
-        with DataSource(stream, node) as data_source:
-            for l in stream:
-                assert next(data_source) == l.encode('utf-8')
+def test_data_source(data):
+    with DataSource(data['stream'], data['node']) as data_source:
+        for letter in data['stream']:
+            assert next(data_source) == letter.encode('utf-8')
 
-        with Compute(task, node) as compute:
-            for l in stream:
-                assert next(compute) == task(l).encode('utf-8')
+def test_compute(data):
+    with Compute(data['task'], data['node']) as compute:
+        for letter in data['stream']:
+            assert next(compute) == data['task'](letter).encode('utf-8')
 
-        with Materialize(lambda x: x, node) as materialize:
-            for l in stream:
-                assert next(materialize) == task(l)
+def test_materialize(data):
+    with Materialize(lambda x: x, data['node']) as materialize:
+        for letter in data['stream']:
+            assert next(materialize) == data['task'](letter)
