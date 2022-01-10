@@ -29,12 +29,12 @@ jobs:
       run: |
         sudo apt install -y vsftpd
         sudo sed -i 's/anonymous_enable=NO/anonymous_enable=YES/' /etc/vsftpd.conf
-        echo 'anon_other_write_enable=YES' | sudo tee -a /etc/vsftpd.conf
+        sudo sed -i 's/#write_enable=YES/write_enable=YES/' /etc/vsftpd.conf
+        echo 'anon_other_write_enable=YES' | sudo tee -a /etc/vsftpd.conf > /dev/null
         sudo mkdir /srv/ftp/files
         sudo chown root:ftp /srv/ftp/files
         sudo chmod go+w /srv/ftp/files
         sudo systemctl restart vsftpd.service
-
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip

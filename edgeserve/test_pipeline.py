@@ -15,7 +15,7 @@ def raw_data():
 @pytest.fixture()
 def ftp_data():
     def ftp_task(local_file_path):
-        with open(local_file_path) as f:
+        with open(local_file_path, 'r') as f:
             content = f.read()
             assert content == 'Hello World!'
     return {'node': 'pulsar://localhost:6650',
@@ -25,8 +25,8 @@ def ftp_data():
 
 
 def test_pipeline(raw_data):
-    with DataSource(raw_data['stream'], raw_data['node']) as data_source,\
-            Compute(raw_data['task'], raw_data['node']) as compute,\
+    with DataSource(raw_data['stream'], raw_data['node']) as data_source, \
+            Compute(raw_data['task'], raw_data['node']) as compute, \
             Materialize(lambda x: x, raw_data['node']) as materialize:
         for letter in raw_data['stream']:
             assert next(data_source) == letter.encode('utf-8')

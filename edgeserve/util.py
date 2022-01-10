@@ -5,7 +5,6 @@ import sys
 import time
 from urllib.error import URLError
 from urllib.parse import unquote, urlparse
-from urllib.response import addclosehook
 
 
 def local_to_global_path(local_file_path, local_ftp_path):
@@ -65,16 +64,13 @@ class FTPHandler:
 
         try:
             fw = self.connect_ftp(user, passwd, host, dir, socket._GLOBAL_DEFAULT_TIMEOUT)
-            type = file and 'I' or 'D'
-            fp, retrlen = fw.retrfile(file, type)
-            return fp, retrlen
+            fw.retrfile(file)
         except ftplib.all_errors as exp:
             exc = URLError('ftp error: %r' % exp)
             raise exc.with_traceback(sys.exc_info()[2])
 
     def connect_ftp(self, user, passwd, host, dir, timeout):
-        return ftpwrapper(user, passwd, host, dir, timeout,
-                          persistent=False)
+        return ftpwrapper(user, passwd, host, dir, timeout)
 
 
 class CacheFTPHandler(FTPHandler):
@@ -134,90 +130,34 @@ class CacheFTPHandler(FTPHandler):
 class ftpwrapper:
     """Class used by open_ftp() for cache of open FTP connections."""
 
-    def __init__(self, user, passwd, host, dir, timeout=None,
-                 persistent=True):
+    def __init__(self, user, passwd, host, dir, timeout=None):
         self.user = user
         self.passwd = passwd
         self.host = host
         self.dir = dir
         self.timeout = timeout
-        self.refcount = 0
-        self.keepalive = persistent
         try:
-            self.init()
-        except:
-            self.close()
-            raise
+            self.ftp = ftplib.FTP(self.host, timeout=self.timeout)
+            self.ftp.set_pasv(False)
+            self.ftp.login(self.user, self.passwd)
+            self.ftp.cwd(self.dir)
+        except ftplib.error_perm as reason:
+            raise URLError('ftp error: %r' % reason).with_traceback(
+                sys.exc_info()[2])
 
-    def init(self):
-        self.busy = 0
-        self.ftp = ftplib.FTP(self.host, timeout=self.timeout)
-        self.ftp.set_pasv(False)
-        self.ftp.login(self.user, self.passwd)
-        self.ftp.cwd(self.dir)
-
-    def retrfile(self, file, type):
-        self.endtransfer()
-        if type in ('d', 'D'): cmd = 'TYPE A'; isdir = 1
-        else: cmd = 'TYPE ' + type; isdir = 0
+    def retrfile(self, file):
         try:
-            self.ftp.voidcmd(cmd)
-        except ftplib.all_errors:
-            self.init()
-            self.ftp.voidcmd(cmd)
-        conn = None
-        if file and not isdir:
-            # Try to retrieve as a file
-            try:
+            self.ftp.voidcmd('TYPE I')
+            with open(file + '.tmp', 'wb') as fp:
                 cmd = 'RETR ' + file
-                conn, retrlen = self.ftp.ntransfercmd(cmd)
-                cmd = 'DELE ' + file
-                conn, _ = self.ftp.ntransfercmd(cmd)
-            except ftplib.error_perm as reason:
-                if str(reason)[:3] != '550':
-                    raise URLError('ftp error: %r' % reason).with_traceback(
-                        sys.exc_info()[2])
-        if not conn:
-            # Set transfer mode to ASCII!
-            self.ftp.voidcmd('TYPE A')
-            # Try a directory listing. Verify that directory exists.
-            if file:
-                pwd = self.ftp.pwd()
-                try:
-                    try:
-                        self.ftp.cwd(file)
-                    except ftplib.error_perm as reason:
-                        raise URLError('ftp error: %r' % reason) from reason
-                finally:
-                    self.ftp.cwd(pwd)
-                cmd = 'LIST ' + file
-            else:
-                cmd = 'LIST'
-            conn, retrlen = self.ftp.ntransfercmd(cmd)
-        self.busy = 1
-
-        ftpobj = addclosehook(conn.makefile('rb'), self.file_close)
-        self.refcount += 1
-        conn.close()
-        # Pass back both a suitably decorated object and a retrieval length
-        return ftpobj, retrlen
-
-    def endtransfer(self):
-        self.busy = 0
+                self.ftp.retrbinary(cmd, fp.write)
+            self.ftp.delete(file)
+            os.rename(file + '.tmp', file)
+        except ftplib.error_perm as reason:
+            raise URLError('ftp error: %r' % reason).with_traceback(
+                sys.exc_info()[2])
 
     def close(self):
-        self.keepalive = False
-        if self.refcount <= 0:
-            self.real_close()
-
-    def file_close(self):
-        self.endtransfer()
-        self.refcount -= 1
-        if self.refcount <= 0 and not self.keepalive:
-            self.real_close()
-
-    def real_close(self):
-        self.endtransfer()
         try:
             self.ftp.close()
         except ftplib.all_errors:
