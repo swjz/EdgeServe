@@ -8,7 +8,7 @@ class Materialize:
         self.client = pulsar.Client(pulsar_node)
         self.consumer = self.client.subscribe(topic, subscription_name='my-sub')
         self.materialize = materialize
-        self.gate = lambda x: x.decode('utf-8') if gate is None else gate
+        self.gate = (lambda x: x.decode('utf-8')) if gate is None else gate
         self.ftp = ftp
         self.local_ftp_path = local_ftp_path
         self.ftp_delete = ftp_delete

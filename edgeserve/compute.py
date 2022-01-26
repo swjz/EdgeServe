@@ -9,8 +9,8 @@ class Compute:
         self.producer = self.client.create_producer(topic_out)
         self.consumer = self.client.subscribe(topic_in, subscription_name='my-sub')
         self.task = task
-        self.gate_in = lambda x: x.decode('utf-8') if gate_in is None else gate_in
-        self.gate_out = lambda x: x.encode('utf-8') if gate_out is None else gate_out
+        self.gate_in = (lambda x: x.decode('utf-8')) if gate_in is None else gate_in
+        self.gate_out = (lambda x: x.encode('utf-8')) if gate_out is None else gate_out
         self.ftp = ftp
         self.local_ftp_path = local_ftp_path
         self.ftp_memory = ftp_memory
