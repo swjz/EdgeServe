@@ -3,7 +3,7 @@ from util import ftp_fetch, local_to_global_path
 
 
 class Materialize:
-    def __init__(self, materialize, pulsar_node, gate=None, ftp=False,
+    def __init__(self, materialize, pulsar_node, gate=None, ftp=False, ftp_delete=False,
                  local_ftp_path='/srv/ftp/', topic='dst-topic'):
         self.client = pulsar.Client(pulsar_node)
         self.consumer = self.client.subscribe(topic, subscription_name='my-sub')
@@ -11,6 +11,7 @@ class Materialize:
         self.gate = lambda x: x.decode('utf-8') if gate is None else gate
         self.ftp = ftp
         self.local_ftp_path = local_ftp_path
+        self.ftp_delete = ftp_delete
 
     def __enter__(self):
         return self
@@ -27,7 +28,7 @@ class Materialize:
 
         if self.ftp:
             # download the file from FTP server and then delete the file from server
-            local_file_path = ftp_fetch(data, self.local_ftp_path)
+            local_file_path = ftp_fetch(data, self.local_ftp_path, memory=False, delete=self.ftp_delete)
             self.materialize(local_file_path)
             global_file_path = local_to_global_path(local_file_path, self.local_ftp_path)
             self.consumer.acknowledge(msg)

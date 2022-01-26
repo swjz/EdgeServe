@@ -14,14 +14,18 @@ def raw_data():
 
 @pytest.fixture()
 def ftp_data():
-    def ftp_task(local_file_path):
+    def ftp_task_file(local_file_path):
         with open(local_file_path, 'r') as f:
             content = f.read()
             assert content == 'Hello World!'
+
+    def ftp_task_memory(data):
+        return data.decode('utf-8') * 2
+
     return {'node': 'pulsar://localhost:6650',
             'stream': ['ftp://localhost/files/1.txt', 'ftp://localhost/files/2.txt', 'ftp://localhost/files/3.txt'],
             'local': ['/srv/ftp/files/1.txt', '/srv/ftp/files/2.txt', '/srv/ftp/files/3.txt'],
-            'task': ftp_task}
+            'task': {'file': ftp_task_file, 'memory': ftp_task_memory}}
 
 
 def test_pipeline(raw_data):
@@ -52,15 +56,29 @@ def test_materialize(raw_data):
             assert next(materialize) == raw_data['task'](letter)
 
 
-def test_ftp(ftp_data):
+def test_ftp_file(ftp_data):
     for file in ftp_data['local']:
         with open(file, 'w') as f:
             f.write('Hello World!')
 
     with DataSource(ftp_data['stream'], ftp_data['node']) as data_source, \
-            Compute(ftp_data['task'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/') as compute, \
+            Compute(ftp_data['task']['file'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/',
+                    ftp_memory=False, ftp_delete=True) as compute, \
             Materialize(lambda x: x, ftp_data['node'], ftp=True) as materialize:
         for path in ftp_data['stream']:
             assert next(data_source) == path.encode('utf-8')
             assert urlopen(next(compute).decode('utf-8')).read() == b'Hello World!'
             assert urlopen(next(materialize)).read() == b'Hello World!'
+
+
+def test_ftp_memory(ftp_data):
+    for file in ftp_data['local']:
+        with open(file, 'w') as f:
+            f.write('Hello World!')
+
+    with DataSource(ftp_data['stream'], ftp_data['node']) as data_source, \
+            Compute(ftp_data['task']['memory'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/',
+                    ftp_memory=True, ftp_delete=True) as compute:
+        for path in ftp_data['stream']:
+            assert next(data_source) == path.encode('utf-8')
+            assert next(compute) == b'Hello World!' * 2
