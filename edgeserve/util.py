@@ -11,7 +11,7 @@ def local_to_global_path(local_file_path, local_ftp_path):
     return 'ftp://' + socket.gethostname() + '/' + local_file_path.replace(local_ftp_path, '')
 
 
-def ftp_fetch(url, local_ftp_path='/srv/ftp/'):
+def ftp_fetch(url, local_ftp_path='/srv/ftp/', memory=True, delete=False):
     scheme, host, path, _, _, _ = urlparse(url)
     if scheme != 'ftp':
         raise OSError('ftp error: wrong URL, expect ftp://')
@@ -28,7 +28,10 @@ def ftp_fetch(url, local_ftp_path='/srv/ftp/'):
     dir = '/'.join(dirs)
     os.chdir(local_ftp_path + dir)
     handler = CacheFTPHandler()
-    handler.ftp_open(host, dir, file)
+    if memory:
+        return handler.ftp_open(host, dir, file, memory, delete)
+
+    handler.ftp_open(host, dir, file, memory, delete)
     return local_ftp_path + dir + '/' + file
 
 
@@ -46,7 +49,7 @@ def splitpasswd(user):
 
 # Borrowed from urllib.request
 class FTPHandler:
-    def ftp_open(self, host, dir, file):
+    def ftp_open(self, host, dir, file, memory=True, delete=False):
         # username/password handling
         user, host = splituser(host)
         if user:
@@ -64,7 +67,9 @@ class FTPHandler:
 
         try:
             fw = self.connect_ftp(user, passwd, host, dir, socket._GLOBAL_DEFAULT_TIMEOUT)
-            fw.retrfile(file)
+            if memory:
+                return fw.retrmemory(file, delete)
+            fw.retrfile(file, delete)
         except ftplib.all_errors as exp:
             exc = URLError('ftp error: %r' % exp)
             raise exc.with_traceback(sys.exc_info()[2])
@@ -145,13 +150,29 @@ class ftpwrapper:
             raise URLError('ftp error: %r' % reason).with_traceback(
                 sys.exc_info()[2])
 
-    def retrfile(self, file):
+    def retrmemory(self, file, delete=False):
+        data = []
+        def read_block(block):
+            data.append(block)
+        try:
+            self.ftp.voidcmd('TYPE I')
+            cmd = 'RETR ' + file
+            self.ftp.retrbinary(cmd, read_block)
+            if delete:
+                self.ftp.delete(file)
+            return b''.join(data)
+        except ftplib.error_perm as reason:
+            raise URLError('ftp error: %r' % reason).with_traceback(
+                sys.exc_info()[2])
+
+    def retrfile(self, file, delete=False):
         try:
             self.ftp.voidcmd('TYPE I')
             with open(file + '.tmp', 'wb') as fp:
                 cmd = 'RETR ' + file
                 self.ftp.retrbinary(cmd, fp.write)
-            self.ftp.delete(file)
+            if delete:
+                self.ftp.delete(file)
             os.rename(file + '.tmp', file)
         except ftplib.error_perm as reason:
             raise URLError('ftp error: %r' % reason).with_traceback(
