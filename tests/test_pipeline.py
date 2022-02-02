@@ -1,6 +1,6 @@
-from compute import Compute
-from data_source import DataSource
-from materialize import Materialize
+from edgeserve.compute import Compute
+from edgeserve.data_source import DataSource
+from edgeserve.materialize import Materialize
 from urllib.request import urlopen
 import pytest
 

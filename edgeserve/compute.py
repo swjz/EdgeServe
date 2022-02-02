@@ -1,5 +1,5 @@
 import pulsar
-from util import ftp_fetch, local_to_global_path
+from edgeserve.util import ftp_fetch, local_to_global_path
 
 
 class Compute:
