@@ -49,4 +49,7 @@ jobs:
     - name: Test with pytest
       run: |
         pip install .
+        python edgeserve/worker.py pulsar://localhost:6650 code-raw &
+        python edgeserve/worker.py pulsar://localhost:6650 code-ftp true false /srv/ftp/ &
+        python edgeserve/worker.py pulsar://localhost:6650 code-ftp-memory true true /srv/ftp/ &
         pytest
