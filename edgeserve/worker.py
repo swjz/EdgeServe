@@ -39,8 +39,8 @@ class Worker:
         with redirect_stdout(stdout), redirect_stderr(stderr):
             exec(data)
 
-        print(stdout.getvalue())
-        print(stderr.getvalue())
+        print(stdout.getvalue(), flush=True)
+        print(stderr.getvalue(), file=sys.stderr, flush=True)
 
         self.consumer.acknowledge(msg)
 
