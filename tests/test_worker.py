@@ -8,7 +8,7 @@ node = 'pulsar://localhost:6650'
 stream = ['Hello World!']
 with DataSource(stream, node) as data_source:
     next(data_source)
-print('Done!')
+print('Done!', flush=True)
 """
 
 compute_code = """
@@ -17,7 +17,7 @@ node = 'pulsar://localhost:6650'
 task = lambda x: x
 with Compute(task, node) as compute:
     assert next(compute) == b'Hello World!'
-print('Done!')
+print('Done!', flush=True)
 """
 
 

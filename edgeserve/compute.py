@@ -32,7 +32,7 @@ class Compute:
         if self.ftp and not self.ftp_memory:  # FTP file mode
             # download the file from FTP server and then delete the file from server
             local_file_path = ftp_fetch(data, self.local_ftp_path, memory=False, delete=self.ftp_delete)
-            self.task(local_file_path)
+            self.task(local_file_path)  # TODO(swjz): no return value in file mode, might change later
             global_file_path = local_to_global_path(local_file_path, self.local_ftp_path)
             output = self.gate_out(global_file_path)
         else:

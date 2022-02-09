@@ -1,8 +1,6 @@
 import sys
 import pulsar
 from edgeserve.util import ftp_fetch
-from io import StringIO
-from contextlib import redirect_stdout, redirect_stderr
 
 
 class Worker:
@@ -35,13 +33,7 @@ class Worker:
             if self.ftp:  # FTP memory mode
                 data = ftp_fetch(data, self.local_ftp_path, memory=True, delete=False)
 
-        stdout, stderr = StringIO(), StringIO()
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            exec(data)
-
-        print(stdout.getvalue(), flush=True)
-        print(stderr.getvalue(), file=sys.stderr, flush=True)
-
+        exec(data)
         self.consumer.acknowledge(msg)
 
 
