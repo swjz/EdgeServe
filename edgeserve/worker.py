@@ -4,9 +4,9 @@ from edgeserve.util import ftp_fetch
 
 
 class Worker:
-    def __init__(self, pulsar_node, topic='code-topic', ftp=False, ftp_memory=True, local_ftp_path='/srv/ftp/'):
+    def __init__(self, pulsar_node, topic='code', ftp=False, ftp_memory=True, local_ftp_path='/srv/ftp/'):
         self.client = pulsar.Client(pulsar_node)
-        self.consumer = self.client.subscribe(topic, subscription_name='my-sub')
+        self.consumer = self.client.subscribe(topic, subscription_name='worker-sub')
         self.gate = lambda x: x.decode('utf-8')
         self.ftp = ftp
         self.local_ftp_path = local_ftp_path
@@ -40,7 +40,7 @@ class Worker:
 if __name__ == "__main__":
     # Example: python worker.py pulsar://localhost:6650 code-ftp true false /srv/ftp/
     node = sys.argv[1]
-    topic = sys.argv[2] if len(sys.argv) >= 3 else 'code-topic'
+    topic = sys.argv[2] if len(sys.argv) >= 3 else 'code'
     ftp = sys.argv[3] in ['true', 'True'] if len(sys.argv) >= 4 else False
     ftp_memory = sys.argv[4] in ['true', 'True'] if len(sys.argv) >= 5 else True
     local_ftp_path = sys.argv[5] if len(sys.argv) >= 6 else '/srv/ftp/'

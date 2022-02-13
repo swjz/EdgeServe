@@ -2,7 +2,7 @@ import pulsar
 
 
 class DataSource:
-    def __init__(self, stream, pulsar_node, gate=None, topic='src-topic'):
+    def __init__(self, stream, pulsar_node, gate=None, topic='src'):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic)
         self.stream = iter(stream)

@@ -4,7 +4,7 @@ from edgeserve.util import ftp_fetch, local_to_global_path
 
 class Materialize:
     def __init__(self, materialize, pulsar_node, gate=None, ftp=False, ftp_delete=False,
-                 local_ftp_path='/srv/ftp/', topic='dst-topic'):
+                 local_ftp_path='/srv/ftp/', topic='dst'):
         self.client = pulsar.Client(pulsar_node)
         self.consumer = self.client.subscribe(topic, subscription_name='my-sub')
         self.materialize = materialize

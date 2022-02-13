@@ -9,15 +9,16 @@ import pytest
 def raw_data():
     return {'node': 'pulsar://localhost:6650',
             'stream': 'hello',
-            'task': lambda x: x*2}
+            'task': lambda data: data*2}
 
 
 @pytest.fixture()
 def ftp_data():
-    def ftp_task_file(local_file_path):
-        with open(local_file_path, 'r') as f:
+    def ftp_task_file(file_path):
+        with open(file_path, 'r') as f:
             content = f.read()
             assert content == 'Hello World!'
+            return content
 
     def ftp_task_memory(data):
         return data.decode('utf-8') * 2
@@ -29,8 +30,8 @@ def ftp_data():
 
 
 def test_pipeline(raw_data):
-    with DataSource(raw_data['stream'], raw_data['node']) as data_source, \
-            Compute(raw_data['task'], raw_data['node']) as compute, \
+    with DataSource(raw_data['stream'], raw_data['node'], topic='data') as data_source, \
+            Compute(raw_data['task'], raw_data['node'], topic_in='data') as compute, \
             Materialize(lambda x: x, raw_data['node']) as materialize:
         for letter in raw_data['stream']:
             assert next(data_source) == letter.encode('utf-8')
@@ -39,13 +40,13 @@ def test_pipeline(raw_data):
 
 
 def test_data_source(raw_data):
-    with DataSource(raw_data['stream'], raw_data['node']) as data_source:
+    with DataSource(raw_data['stream'], raw_data['node'], topic='data') as data_source:
         for letter in raw_data['stream']:
             assert next(data_source) == letter.encode('utf-8')
 
 
 def test_compute(raw_data):
-    with Compute(raw_data['task'], raw_data['node']) as compute:
+    with Compute(raw_data['task'], raw_data['node'], topic_in='data') as compute:
         for letter in raw_data['stream']:
             assert next(compute) == raw_data['task'](letter).encode('utf-8')
 
@@ -61,9 +62,9 @@ def test_ftp_file(ftp_data):
         with open(file, 'w') as f:
             f.write('Hello World!')
 
-    with DataSource(ftp_data['stream'], ftp_data['node']) as data_source, \
+    with DataSource(ftp_data['stream'], ftp_data['node'], topic='file_path') as data_source, \
             Compute(ftp_data['task']['file'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/',
-                    ftp_memory=False, ftp_delete=True) as compute, \
+                    ftp_memory=False, ftp_delete=True, topic_in='file_path') as compute, \
             Materialize(lambda x: x, ftp_data['node'], ftp=True) as materialize:
         for path in ftp_data['stream']:
             assert next(data_source) == path.encode('utf-8')
@@ -76,9 +77,9 @@ def test_ftp_memory(ftp_data):
         with open(file, 'w') as f:
             f.write('Hello World!')
 
-    with DataSource(ftp_data['stream'], ftp_data['node']) as data_source, \
+    with DataSource(ftp_data['stream'], ftp_data['node'], topic='data') as data_source, \
             Compute(ftp_data['task']['memory'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/',
-                    ftp_memory=True, ftp_delete=True) as compute:
+                    ftp_memory=True, ftp_delete=True, topic_in='data') as compute:
         for path in ftp_data['stream']:
             assert next(data_source) == path.encode('utf-8')
             assert next(compute) == b'Hello World!' * 2

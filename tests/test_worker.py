@@ -6,7 +6,7 @@ data_source_code = """
 from edgeserve.data_source import DataSource
 node = 'pulsar://localhost:6650'
 stream = ['Hello World!']
-with DataSource(stream, node) as data_source:
+with DataSource(stream, node, topic='data') as data_source:
     next(data_source)
 print('Done!', flush=True)
 """
@@ -14,8 +14,8 @@ print('Done!', flush=True)
 compute_code = """
 from edgeserve.compute import Compute
 node = 'pulsar://localhost:6650'
-task = lambda x: x
-with Compute(task, node) as compute:
+task = lambda data: data
+with Compute(task, node, topic_in='data') as compute:
     assert next(compute) == b'Hello World!'
 print('Done!', flush=True)
 """
