@@ -1,12 +1,14 @@
 import sys
 import pulsar
+from _pulsar import InitialPosition
 from edgeserve.util import ftp_fetch
 
 
 class Worker:
     def __init__(self, pulsar_node, topic='code', ftp=False, ftp_memory=True, local_ftp_path='/srv/ftp/'):
         self.client = pulsar.Client(pulsar_node)
-        self.consumer = self.client.subscribe(topic, subscription_name='worker-sub')
+        self.consumer = self.client.subscribe(topic, subscription_name='worker-sub',
+                                              initial_position=InitialPosition.Earliest)
         self.gate = lambda x: x.decode('utf-8')
         self.ftp = ftp
         self.local_ftp_path = local_ftp_path

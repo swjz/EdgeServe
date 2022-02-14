@@ -1,5 +1,6 @@
 import os
 import pulsar
+from _pulsar import InitialPosition
 from edgeserve.util import ftp_fetch, local_to_global_path
 
 
@@ -8,7 +9,8 @@ class Compute:
                  local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst', max_time_diff_ms=10 * 1000):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out)
-        self.consumer = self.client.subscribe(topic_in, subscription_name='my-sub')
+        self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
+                                              initial_position=InitialPosition.Earliest)
         self.task = task
         self.gate_in = (lambda x: x.decode('utf-8')) if gate_in is None else gate_in
         self.gate_out = (lambda x: x.encode('utf-8')) if gate_out is None else gate_out
