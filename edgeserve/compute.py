@@ -78,5 +78,5 @@ class Compute:
                 return None
 
         self.producer.send(output)
-        self.consumer.acknowledge_cumulative(msg)
+        self.consumer.acknowledge(msg)
         return output
