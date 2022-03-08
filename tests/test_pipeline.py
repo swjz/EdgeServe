@@ -30,7 +30,7 @@ def ftp_data():
 
 
 def test_pipeline(raw_data):
-    with DataSource(raw_data['stream'], raw_data['node'], topic='data') as data_source, \
+    with DataSource(raw_data['stream'], raw_data['node'], source_id='data', topic='data') as data_source, \
             Compute(raw_data['task'], raw_data['node'], topic_in='data') as compute, \
             Materialize(lambda x: x, raw_data['node']) as materialize:
         for letter in raw_data['stream']:
@@ -40,7 +40,7 @@ def test_pipeline(raw_data):
 
 
 def test_data_source(raw_data):
-    with DataSource(raw_data['stream'], raw_data['node'], topic='data') as data_source:
+    with DataSource(raw_data['stream'], raw_data['node'], source_id='data', topic='data') as data_source:
         for letter in raw_data['stream']:
             assert next(data_source) == letter.encode('utf-8')
 
@@ -62,7 +62,7 @@ def test_ftp_file(ftp_data):
         with open(file, 'w') as f:
             f.write('Hello World!')
 
-    with DataSource(ftp_data['stream'], ftp_data['node'], topic='file_path') as data_source, \
+    with DataSource(ftp_data['stream'], ftp_data['node'], source_id='file_path', topic='file_path') as data_source, \
             Compute(ftp_data['task']['file'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/',
                     ftp_memory=False, ftp_delete=True, topic_in='file_path') as compute, \
             Materialize(lambda x: x, ftp_data['node'], ftp=True) as materialize:
@@ -77,7 +77,7 @@ def test_ftp_memory(ftp_data):
         with open(file, 'w') as f:
             f.write('Hello World!')
 
-    with DataSource(ftp_data['stream'], ftp_data['node'], topic='data') as data_source, \
+    with DataSource(ftp_data['stream'], ftp_data['node'], source_id='data', topic='data') as data_source, \
             Compute(ftp_data['task']['memory'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/',
                     ftp_memory=True, ftp_delete=True, topic_in='data') as compute:
         for path in ftp_data['stream']:

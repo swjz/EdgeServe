@@ -1,12 +1,17 @@
 import pulsar
-from edgeserve.util import ftp_fetch, local_to_global_path
+from _pulsar import InitialPosition
+from pulsar.schema import AvroSchema
 
+from edgeserve.util import ftp_fetch, local_to_global_path
+from edgeserve.message_format import MessageFormat
 
 class Materialize:
     def __init__(self, materialize, pulsar_node, gate=None, ftp=False, ftp_delete=False,
                  local_ftp_path='/srv/ftp/', topic='dst'):
         self.client = pulsar.Client(pulsar_node)
-        self.consumer = self.client.subscribe(topic, subscription_name='my-sub')
+        self.consumer = self.client.subscribe(topic, subscription_name='my-sub',
+                                              schema=AvroSchema(MessageFormat),
+                                              initial_position=InitialPosition.Earliest)
         self.materialize = materialize
         self.gate = (lambda x: x.decode('utf-8')) if gate is None else gate
         self.ftp = ftp
@@ -24,7 +29,7 @@ class Materialize:
 
     def __next__(self):
         msg = self.consumer.receive()
-        data = self.gate(msg.data())
+        data = self.gate(msg.value().payload)
 
         if self.ftp:
             # download the file from FTP server and then delete the file from server

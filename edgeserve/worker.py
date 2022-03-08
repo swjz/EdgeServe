@@ -1,13 +1,17 @@
 import sys
 import pulsar
 from _pulsar import InitialPosition
+from pulsar.schema import AvroSchema
+
 from edgeserve.util import ftp_fetch
+from edgeserve.message_format import MessageFormat
 
 
 class Worker:
     def __init__(self, pulsar_node, topic='code', ftp=False, ftp_memory=True, local_ftp_path='/srv/ftp/'):
         self.client = pulsar.Client(pulsar_node)
         self.consumer = self.client.subscribe(topic, subscription_name='worker-sub',
+                                              schema=AvroSchema(MessageFormat),
                                               initial_position=InitialPosition.Earliest)
         self.gate = lambda x: x.decode('utf-8')
         self.ftp = ftp
@@ -25,7 +29,7 @@ class Worker:
 
     def __next__(self):
         msg = self.consumer.receive()
-        data = self.gate(msg.data())
+        data = self.gate(msg.value().payload)
 
         if self.ftp and not self.ftp_memory:  # FTP file mode
             # download the file from FTP server and then delete the file from server

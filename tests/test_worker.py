@@ -1,4 +1,4 @@
-from edgeserve.data_source import DataSource
+from edgeserve.data_source import CodeSource
 import pytest
 
 
@@ -6,7 +6,7 @@ data_source_code = """
 from edgeserve.data_source import DataSource
 node = 'pulsar://localhost:6650'
 stream = ['Hello World!']
-with DataSource(stream, node, topic='data') as data_source:
+with DataSource(stream, node, source_id='data', topic='data') as data_source:
     next(data_source)
 print('Done!', flush=True)
 """
@@ -27,7 +27,7 @@ def raw_data():
 
 
 def test_worker(raw_data):
-    with DataSource([data_source_code, compute_code], raw_data['node'], topic='code-raw') as data_source:
+    with CodeSource([data_source_code, compute_code], raw_data['node'], topic='code-raw') as data_source:
         next(data_source)
         next(data_source)
 
@@ -56,7 +56,7 @@ def test_worker_ftp(ftp_data):
     with open(ftp_data['compute_local'], 'w') as f:
         f.write(compute_code)
 
-    with DataSource([ftp_data['data_source_global'], ftp_data['compute_global']], ftp_data['node'],
+    with CodeSource([ftp_data['data_source_global'], ftp_data['compute_global']], ftp_data['node'],
                     topic='code-ftp') as data_source:
         next(data_source)
         next(data_source)
@@ -77,7 +77,7 @@ def test_worker_ftp_memory(ftp_data):
     with open(ftp_data['compute_local'], 'w') as f:
         f.write(compute_code)
 
-    with DataSource([ftp_data['data_source_global'], ftp_data['compute_global']], ftp_data['node'],
+    with CodeSource([ftp_data['data_source_global'], ftp_data['compute_global']], ftp_data['node'],
                     topic='code-ftp-memory') as data_source:
         next(data_source)
         next(data_source)
