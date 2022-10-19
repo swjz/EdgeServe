@@ -93,7 +93,12 @@ class Compute:
             else:
                 return None
 
-        output = MessageFormat(source_id=source_id, payload=output)
-        self.producer.send(output)
-        self.consumer.acknowledge(msg)
-        return output.payload
+        if output:
+            output = MessageFormat(source_id=source_id, payload=output)
+            self.producer.send(output)
+            self.consumer.acknowledge(msg)
+            return output.payload
+        else:
+            # No output is given, no need to materialize
+            self.consumer.acknowledge(msg)
+            return None
