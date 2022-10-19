@@ -10,7 +10,7 @@ from edgeserve.message_format import MessageFormat
 
 class Compute:
     def __init__(self, task, pulsar_node, gate_in=None, gate_out=None, ftp=False, ftp_memory=False, ftp_delete=False,
-                 local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst', max_time_diff_ms=10 * 1000):
+                 local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst', max_time_diff_ms=10 * 1000, no_overlap=False):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=AvroSchema(MessageFormat))
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
@@ -26,6 +26,7 @@ class Compute:
         self.latest_msg = dict()
         self.latest_msg_time_ms = dict()
         self.max_time_diff_ms = max_time_diff_ms
+        self.no_overlap = no_overlap
 
     def __enter__(self):
         return self
@@ -47,6 +48,12 @@ class Compute:
             if latest - earliest > self.max_time_diff_ms:
                 return False, None
         output = self.task(**self.latest_msg)
+
+        # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
+        if self.no_overlap:
+            self.latest_msg = dict()
+            self.latest_msg_time_ms = dict()
+
         return True, output
 
     def __iter__(self):
