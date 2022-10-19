@@ -1,6 +1,6 @@
 import os
 import pulsar
-from _pulsar import InitialPosition
+from _pulsar import InitialPosition, ConsumerType
 from pulsar.schema import AvroSchema
 from inspect import signature
 
@@ -14,6 +14,7 @@ class Compute:
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=AvroSchema(MessageFormat))
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
+                                              consumer_type=ConsumerType.Shared,
                                               schema=AvroSchema(MessageFormat),
                                               initial_position=InitialPosition.Earliest)
         self.task = task
