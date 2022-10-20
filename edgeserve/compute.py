@@ -90,8 +90,6 @@ class Compute:
                     f.write(output)
                 global_file_path = local_to_global_path(local_file_path + '.output', self.local_ftp_path)
                 output = self.gate_out(global_file_path)
-            else:
-                return None
         else:
             if self.ftp:  # FTP memory mode
                 self.latest_msg[source_id] = ftp_fetch(data, self.local_ftp_path,
@@ -100,8 +98,6 @@ class Compute:
             ret, output = self._try_task()
             if ret:
                 output = self.gate_out(output)
-            else:
-                return None
 
         if output:
             output = MessageFormat(source_id=source_id, payload=output)
