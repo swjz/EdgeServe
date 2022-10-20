@@ -1,4 +1,5 @@
 import os
+import time
 import pulsar
 from _pulsar import InitialPosition, ConsumerType
 from pulsar.schema import AvroSchema
@@ -10,7 +11,8 @@ from edgeserve.message_format import MessageFormat
 
 class Compute:
     def __init__(self, task, pulsar_node, gate_in=None, gate_out=None, ftp=False, ftp_memory=False, ftp_delete=False,
-                 local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst', max_time_diff_ms=10 * 1000, no_overlap=False):
+                 local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst', max_time_diff_ms=10 * 1000,
+                 no_overlap=False, min_interval_ms=0):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=AvroSchema(MessageFormat))
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
@@ -28,6 +30,8 @@ class Compute:
         self.latest_msg_time_ms = dict()
         self.max_time_diff_ms = max_time_diff_ms
         self.no_overlap = no_overlap
+        self.min_interval_ms = min_interval_ms
+        self.last_run_ms = 0
 
     def __enter__(self):
         return self
@@ -36,6 +40,10 @@ class Compute:
         self.client.close()
 
     def _try_task(self):
+        # Avoid running too frequently for expensive tasks
+        if time.time() * 1000 < self.last_run_ms + self.min_interval_ms:
+            return False, None
+
         if len(self.latest_msg) < len(signature(self.task).parameters):
             return False, None
 
@@ -49,6 +57,7 @@ class Compute:
             if latest - earliest > self.max_time_diff_ms:
                 return False, None
         output = self.task(**self.latest_msg)
+        self.last_run_ms = time.time() * 1000
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
