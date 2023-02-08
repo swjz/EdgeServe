@@ -30,7 +30,8 @@ class Compute:
         self.ftp_delete = ftp_delete
         self.latest_msg = dict()
         self.latest_msg_id = dict()
-        self.latest_msg_time_ms = dict()
+        self.latest_msg_publish_time_ms = dict()
+        self.latest_msg_consumed_time_ms = dict()
         self.max_time_diff_ms = max_time_diff_ms
         self.no_overlap = no_overlap
         self.min_interval_ms = min_interval_ms  # prediction frequency
@@ -54,28 +55,33 @@ class Compute:
         earliest = None
         latest = None
         for source_id in self.latest_msg.keys():
-            if earliest is None or self.latest_msg_time_ms[source_id] < earliest:
-                earliest = self.latest_msg_time_ms[source_id]
-            if latest is None or self.latest_msg_time_ms[source_id] > latest:
-                latest = self.latest_msg_time_ms[source_id]
+            if earliest is None or self.latest_msg_publish_time_ms[source_id] < earliest:
+                earliest = self.latest_msg_publish_time_ms[source_id]
+            if latest is None or self.latest_msg_publish_time_ms[source_id] > latest:
+                latest = self.latest_msg_publish_time_ms[source_id]
             if latest - earliest > self.max_time_diff_ms:
                 return False, None
         start_compute_time_ms = time.time() * 1000
         output = self.task(**self.latest_msg)
         self.last_run_ms = time.time() * 1000
 
-        # If log_path is not None, we write aggregation decisions to this log file.
+        # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
             with open(self.log_path + '/' + str(self.last_run_ms) + '.log', 'wb') as f:
-                replay_log = {'msg_id': self.latest_msg_id, 'start_compute_time_ms': start_compute_time_ms,
-                              'finish_compute_time_ms': self.last_run_ms, 'msg_payload': self.latest_msg}
+                replay_log = {'msg_id': self.latest_msg_id,
+                              'msg_publish_time_ms': self.latest_msg_publish_time_ms,
+                              'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
+                              'start_compute_time_ms': start_compute_time_ms,
+                              'finish_compute_time_ms': self.last_run_ms,
+                              'msg_payload': self.latest_msg}
                 pickle.dump(replay_log, f)
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
             self.latest_msg = dict()
             self.latest_msg_id = dict()
-            self.latest_msg_time_ms = dict()
+            self.latest_msg_publish_time_ms = dict()
+            self.latest_msg_consumed_time_ms = dict()
 
         return True, output
 
@@ -89,7 +95,8 @@ class Compute:
         source_id = value.source_id
         data = self.gate_in(value.payload)  # path to file if ftp, raw data in bytes otherwise
         if data is not None:
-            self.latest_msg_time_ms[source_id] = msg.publish_timestamp()
+            self.latest_msg_publish_time_ms[source_id] = msg.publish_timestamp()
+            self.latest_msg_consumed_time_ms[source_id] = time.time() * 1000
             self.latest_msg[source_id] = data
             self.latest_msg_id[source_id] = msg_id.serialize()
 

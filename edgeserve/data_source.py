@@ -1,16 +1,20 @@
 import pulsar
 from pulsar.schema import AvroSchema
+import time
+import os
+import pickle
 
 from edgeserve.message_format import MessageFormat
 
 
 class DataSource:
-    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src'):
+    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', log_path=None):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic, schema=AvroSchema(MessageFormat))
         self.stream = iter(stream)
         self.gate = (lambda x: x.encode('utf-8')) if gate is None else gate
         self.source_id = source_id
+        self.log_path = log_path
 
     def __enter__(self):
         return self
@@ -23,8 +27,19 @@ class DataSource:
 
     def __next__(self):
         data = self.gate(next(self.stream))
+        data_collection_time_ms = time.time() * 1000
         message = MessageFormat(source_id=self.source_id, payload=data)
-        self.producer.send(message)
+        msg_id = self.producer.send(message)
+        msg_sent_time_ms = time.time() * 1000
+
+        # If log_path is not None, we write timestamps to a log file.
+        if self.log_path and os.path.isdir(self.log_path):
+            with open(self.log_path + '/' + str(data_collection_time_ms) + '.log', 'wb') as f:
+                replay_log = {'msg_id': msg_id.serialize(),
+                              'data_collection_time_ms': data_collection_time_ms,
+                              'msg_sent_time_ms': msg_sent_time_ms}
+                pickle.dump(replay_log, f)
+
         return data
 
 
