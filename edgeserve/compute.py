@@ -1,6 +1,7 @@
 import os
 import time
 import pulsar
+import pickle
 from _pulsar import InitialPosition, ConsumerType
 from pulsar.schema import AvroSchema
 from inspect import signature
@@ -10,9 +11,9 @@ from edgeserve.message_format import MessageFormat
 
 
 class Compute:
-    def __init__(self, task, pulsar_node, gate_in=None, gate_out=None, ftp=False, ftp_memory=False, ftp_delete=False,
-                 local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst', max_time_diff_ms=10 * 1000,
-                 no_overlap=False, min_interval_ms=0):
+    def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp=False, ftp_memory=False,
+                 ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
+                 max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=AvroSchema(MessageFormat))
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
@@ -20,6 +21,7 @@ class Compute:
                                               schema=AvroSchema(MessageFormat),
                                               initial_position=InitialPosition.Earliest)
         self.task = task
+        self.worker_id = worker_id
         self.gate_in = (lambda x: x.decode('utf-8')) if gate_in is None else gate_in
         self.gate_out = (lambda x: x.encode('utf-8')) if gate_out is None else gate_out
         self.ftp = ftp
@@ -27,11 +29,13 @@ class Compute:
         self.ftp_memory = ftp_memory
         self.ftp_delete = ftp_delete
         self.latest_msg = dict()
+        self.latest_msg_id = dict()
         self.latest_msg_time_ms = dict()
         self.max_time_diff_ms = max_time_diff_ms
         self.no_overlap = no_overlap
-        self.min_interval_ms = min_interval_ms
+        self.min_interval_ms = min_interval_ms  # prediction frequency
         self.last_run_ms = 0
+        self.log_path = log_path
 
     def __enter__(self):
         return self
@@ -56,12 +60,21 @@ class Compute:
                 latest = self.latest_msg_time_ms[source_id]
             if latest - earliest > self.max_time_diff_ms:
                 return False, None
+        start_compute_time_ms = time.time() * 1000
         output = self.task(**self.latest_msg)
         self.last_run_ms = time.time() * 1000
+
+        # If log_path is not None, we write aggregation decisions to this log file.
+        if self.log_path and os.path.isdir(self.log_path):
+            with open(self.log_path + '/' + str(self.last_run_ms) + '.log', 'wb') as f:
+                replay_log = {'msg_id': self.latest_msg_id, 'start_compute_time_ms': start_compute_time_ms,
+                              'finish_compute_time_ms': self.last_run_ms, 'msg_payload': self.latest_msg}
+                pickle.dump(replay_log, f)
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
             self.latest_msg = dict()
+            self.latest_msg_id = dict()
             self.latest_msg_time_ms = dict()
 
         return True, output
@@ -71,12 +84,14 @@ class Compute:
 
     def __next__(self):
         msg = self.consumer.receive()
+        msg_id = msg.message_id()
         value = msg.value()
         source_id = value.source_id
         data = self.gate_in(value.payload)  # path to file if ftp, raw data in bytes otherwise
         if data is not None:
             self.latest_msg_time_ms[source_id] = msg.publish_timestamp()
             self.latest_msg[source_id] = data
+            self.latest_msg_id[source_id] = msg_id.serialize()
 
         if self.ftp and not self.ftp_memory:  # FTP file mode
             # download the file from FTP server and then delete the file from server
@@ -100,7 +115,10 @@ class Compute:
                 output = self.gate_out(output)
 
         if output:
-            output = MessageFormat(source_id=source_id, payload=output)
+            if self.log_path and os.path.isdir(self.log_path):
+                with open(self.log_path + '/' + str(self.last_run_ms) + '.output', 'wb') as f:
+                    pickle.dump(output, f)
+            output = MessageFormat(source_id=self.worker_id, payload=output)
             self.producer.send(output)
             self.consumer.acknowledge(msg)
             return output.payload
