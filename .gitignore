@@ -119,10 +119,11 @@ venv.bak/
 videos/**
 *.mp4
 *.avi
+*.mkv
 *.db
 train/
 
-#Model
+# Models
 ssd_mobilenet_v1_coco_2017_11_17/**
 mscoco_label_map.pbtxt
 
