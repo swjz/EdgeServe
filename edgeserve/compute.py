@@ -38,6 +38,7 @@ class Compute:
         self.last_run_ms = 0
         self.log_path = log_path
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
+        self.last_log_duration_ms = -1
 
     def __enter__(self):
         return self
@@ -73,9 +74,11 @@ class Compute:
                           'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
                           'start_compute_time_ms': start_compute_time_ms,
                           'finish_compute_time_ms': self.last_run_ms,
+                          'last_log_duration_ms': self.last_log_duration_ms,
                           'msg_payload': self.latest_msg}
             with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
                 pickle.dump(replay_log, f)
+            self.last_log_duration_ms = time.time() * 1000 - self.last_run_ms
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
