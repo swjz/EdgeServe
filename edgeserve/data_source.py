@@ -8,13 +8,14 @@ from edgeserve.message_format import MessageFormat
 
 
 class DataSource:
-    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', log_path=None):
+    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', log_path=None, log_filename=None):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic, schema=AvroSchema(MessageFormat))
         self.stream = iter(stream)
         self.gate = (lambda x: x.encode('utf-8')) if gate is None else gate
         self.source_id = source_id
         self.log_path = log_path
+        self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
 
     def __enter__(self):
         return self
@@ -34,10 +35,10 @@ class DataSource:
 
         # If log_path is not None, we write timestamps to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            with open(self.log_path + '/' + str(data_collection_time_ms) + '.log', 'wb') as f:
-                replay_log = {'msg_id': msg_id.serialize(),
-                              'data_collection_time_ms': data_collection_time_ms,
-                              'msg_sent_time_ms': msg_sent_time_ms}
+            replay_log = {'msg_id': msg_id.serialize(),
+                          'data_collection_time_ms': data_collection_time_ms,
+                          'msg_sent_time_ms': msg_sent_time_ms}
+            with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
                 pickle.dump(replay_log, f)
 
         return data

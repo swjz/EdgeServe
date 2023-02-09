@@ -13,7 +13,7 @@ from edgeserve.message_format import MessageFormat
 class Compute:
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp=False, ftp_memory=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
-                 max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None):
+                 max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=AvroSchema(MessageFormat))
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
@@ -37,6 +37,7 @@ class Compute:
         self.min_interval_ms = min_interval_ms  # prediction frequency
         self.last_run_ms = 0
         self.log_path = log_path
+        self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
 
     def __enter__(self):
         return self
@@ -67,13 +68,13 @@ class Compute:
 
         # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            with open(self.log_path + '/' + str(self.last_run_ms) + '.log', 'wb') as f:
-                replay_log = {'msg_id': self.latest_msg_id,
-                              'msg_publish_time_ms': self.latest_msg_publish_time_ms,
-                              'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
-                              'start_compute_time_ms': start_compute_time_ms,
-                              'finish_compute_time_ms': self.last_run_ms,
-                              'msg_payload': self.latest_msg}
+            replay_log = {'msg_id': self.latest_msg_id,
+                          'msg_publish_time_ms': self.latest_msg_publish_time_ms,
+                          'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
+                          'start_compute_time_ms': start_compute_time_ms,
+                          'finish_compute_time_ms': self.last_run_ms,
+                          'msg_payload': self.latest_msg}
+            with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
                 pickle.dump(replay_log, f)
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
@@ -115,7 +116,7 @@ class Compute:
         else:
             if self.ftp:  # FTP memory mode
                 self.latest_msg[source_id] = ftp_fetch(data, self.local_ftp_path,
-                                                        memory=True, delete=self.ftp_delete)
+                                                       memory=True, delete=self.ftp_delete)
             # memory mode
             ret, output = self._try_task()
             if ret:
@@ -123,7 +124,7 @@ class Compute:
 
         if output:
             if self.log_path and os.path.isdir(self.log_path):
-                with open(self.log_path + '/' + str(self.last_run_ms) + '.output', 'wb') as f:
+                with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
                     pickle.dump(output, f)
             output = MessageFormat(source_id=self.worker_id, payload=output)
             self.producer.send(output)
