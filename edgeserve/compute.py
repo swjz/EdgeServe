@@ -35,7 +35,7 @@ class Compute:
         self.max_time_diff_ms = max_time_diff_ms
         self.no_overlap = no_overlap
         self.min_interval_ms = min_interval_ms  # prediction frequency
-        self.last_run_ms = 0
+        self.last_run_start_ms = 0
         self.log_path = log_path
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
         self.last_log_duration_ms = -1
@@ -48,7 +48,7 @@ class Compute:
 
     def _try_task(self):
         # Avoid running too frequently for expensive tasks
-        if time.time() * 1000 < self.last_run_ms + self.min_interval_ms:
+        if time.time() * 1000 < self.last_run_start_ms + self.min_interval_ms:
             return False, None
 
         if len(self.latest_msg) < len(signature(self.task).parameters):
@@ -63,22 +63,22 @@ class Compute:
                 latest = self.latest_msg_publish_time_ms[source_id]
             if latest - earliest > self.max_time_diff_ms:
                 return False, None
-        start_compute_time_ms = time.time() * 1000
+        self.last_run_start_ms = time.time() * 1000
         output = self.task(**self.latest_msg)
-        self.last_run_ms = time.time() * 1000
+        last_run_finish_ms = time.time() * 1000
 
         # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
             replay_log = {'msg_id': self.latest_msg_id,
                           'msg_publish_time_ms': self.latest_msg_publish_time_ms,
                           'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
-                          'start_compute_time_ms': start_compute_time_ms,
-                          'finish_compute_time_ms': self.last_run_ms,
+                          'start_compute_time_ms': self.last_run_start_ms,
+                          'finish_compute_time_ms': last_run_finish_ms,
                           'last_log_duration_ms': self.last_log_duration_ms,
                           'msg_payload': self.latest_msg}
             with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
                 pickle.dump(replay_log, f)
-            self.last_log_duration_ms = time.time() * 1000 - self.last_run_ms
+            self.last_log_duration_ms = time.time() * 1000 - last_run_finish_ms
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
