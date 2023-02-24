@@ -2,6 +2,7 @@ import os
 import time
 import pulsar
 import pickle
+import pathlib
 from _pulsar import InitialPosition, ConsumerType
 from pulsar.schema import AvroSchema
 from inspect import signature
@@ -76,9 +77,11 @@ class Compute:
 
         # For now, use the completion timestamp as the filename of output FTP file
         if self.ftp and not self.ftp_memory:
-            with open(os.path.join(self.local_ftp_path, str(last_run_finish_ms)) + '.ftp', 'w') as f:
+            ftp_output_dir = os.path.join(os.path.dirname(local_file_path), 'ftp_output')
+            pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
+            with open(os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp', 'w') as f:
                 f.write(output)
-            output = os.path.join(self.local_ftp_path, str(last_run_finish_ms)) + '.ftp'
+            output = os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp'
 
         # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
