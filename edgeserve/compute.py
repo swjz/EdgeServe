@@ -24,9 +24,9 @@ class Compute:
         self.worker_id = worker_id
         self.gate_in = (lambda x: x.decode('utf-8')) if gate_in is None else gate_in
         self.gate_out = (lambda x: x.encode('utf-8')) if gate_out is None else gate_out
-        self.ftp = ftp
+        self.ftp = ftp  # consider changing this name to ftp_in
         self.local_ftp_path = local_ftp_path
-        self.ftp_memory = ftp_memory
+        self.ftp_memory = ftp_memory  # consider changing this name to (negate) ftp_out
         self.ftp_delete = ftp_delete
         self.latest_msg = dict()
         self.latest_msg_id = dict()
@@ -64,8 +64,21 @@ class Compute:
             if latest - earliest > self.max_time_diff_ms:
                 return False, None
         self.last_run_start_ms = time.time() * 1000
+
+        # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
+        if self.ftp:
+            for source_id in self.latest_msg.keys():
+                local_file_path = ftp_fetch(self.latest_msg[source_id], self.local_ftp_path, memory=self.ftp_memory, delete=self.ftp_delete)
+                self.latest_msg[source_id] = local_file_path
+
         output = self.task(**self.latest_msg)
         last_run_finish_ms = time.time() * 1000
+
+        # For now, use the completion timestamp as the filename of output FTP file
+        if self.ftp and not self.ftp_memory:
+            with open(os.path.join(self.local_ftp_path, str(last_run_finish_ms)) + '.ftp', 'w') as f:
+                f.write(output)
+            output = os.path.join(self.local_ftp_path, str(last_run_finish_ms)) + '.ftp'
 
         # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
@@ -108,18 +121,14 @@ class Compute:
             # download the file from FTP server and then delete the file from server
             if not data.startswith('ftp://'):
                 return None
-            local_file_path = ftp_fetch(data, self.local_ftp_path, memory=False, delete=self.ftp_delete)
-            self.latest_msg[source_id] = local_file_path
+            self.latest_msg[source_id] = data
             ret, output = self._try_task()
             if ret:
-                with open(local_file_path + '.output', 'w') as f:
-                    f.write(output)
-                global_file_path = local_to_global_path(local_file_path + '.output', self.local_ftp_path)
+                global_file_path = local_to_global_path(output, self.local_ftp_path)
                 output = self.gate_out(global_file_path)
         else:
             if self.ftp:  # FTP memory mode
-                self.latest_msg[source_id] = ftp_fetch(data, self.local_ftp_path,
-                                                       memory=True, delete=self.ftp_delete)
+                self.latest_msg[source_id] = data
             # memory mode
             ret, output = self._try_task()
             if ret:
