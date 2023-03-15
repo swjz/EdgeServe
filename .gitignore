@@ -127,3 +127,8 @@ train/
 ssd_mobilenet_v1_coco_2017_11_17/**
 mscoco_label_map.pbtxt
 
+# no-upload folder
+no-upload/
+
+# pdoc documentation
+docs/
