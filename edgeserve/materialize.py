@@ -10,10 +10,10 @@ class Materialize:
                  local_ftp_path='/srv/ftp/', topic='dst'):
         self.client = pulsar.Client(pulsar_node)
         self.consumer = self.client.subscribe(topic, subscription_name='my-sub',
-                                              schema=AvroSchema(MessageFormat),
+                                              schema=pulsar.schema.BytesSchema(),
                                               initial_position=InitialPosition.Earliest)
         self.materialize = materialize
-        self.gate = (lambda x: x.decode('utf-8')) if gate is None else gate
+        self.gate = (lambda x: x) if gate is None else gate
         self.ftp = ftp
         self.local_ftp_path = local_ftp_path
         self.ftp_delete = ftp_delete
@@ -29,7 +29,8 @@ class Materialize:
 
     def __next__(self):
         msg = self.consumer.receive()
-        data = self.gate(msg.value().payload)
+        # data = self.gate(msg.value().payload)
+        data = self.gate(msg.value())
 
         if self.ftp:
             # download the file from FTP server and then delete the file from server
