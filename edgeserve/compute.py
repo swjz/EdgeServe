@@ -10,21 +10,21 @@ from inspect import signature
 from edgeserve.util import ftp_fetch, local_to_global_path
 from edgeserve.message_format import MessageFormat
 
-
+# This version intentionally drops schema support. Data sources cannot be combined adaptively.
 class Compute:
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp=False, ftp_memory=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
                  max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None):
         self.client = pulsar.Client(pulsar_node)
-        self.producer = self.client.create_producer(topic_out, schema=AvroSchema(MessageFormat))
+        self.producer = self.client.create_producer(topic_out, schema=pulsar.schema.BytesSchema())
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
                                               consumer_type=ConsumerType.Shared,
-                                              schema=AvroSchema(MessageFormat),
+                                              schema=pulsar.schema.BytesSchema(),
                                               initial_position=InitialPosition.Earliest)
         self.task = task
         self.worker_id = worker_id
-        self.gate_in = (lambda x: x.decode('utf-8')) if gate_in is None else gate_in
-        self.gate_out = (lambda x: x.encode('utf-8')) if gate_out is None else gate_out
+        self.gate_in = (lambda x: x) if gate_in is None else gate_in
+        self.gate_out = (lambda x: x) if gate_out is None else gate_out
         self.ftp = ftp  # consider changing this name to ftp_in
         self.local_ftp_path = local_ftp_path
         self.ftp_memory = ftp_memory  # consider changing this name to (negate) ftp_out
@@ -112,8 +112,10 @@ class Compute:
         msg = self.consumer.receive()
         msg_id = msg.message_id()
         value = msg.value()
-        source_id = value.source_id
-        data = self.gate_in(value.payload)  # path to file if ftp, raw data in bytes otherwise
+        # source_id = value.source_id
+        # data = self.gate_in(value.payload)  # path to file if ftp, raw data in bytes otherwise
+        source_id = 'data'
+        data = self.gate_in(value)
         if data is not None:
             self.latest_msg_publish_time_ms[source_id] = msg.publish_timestamp()
             self.latest_msg_consumed_time_ms[source_id] = time.time() * 1000
@@ -141,7 +143,7 @@ class Compute:
             if self.log_path and os.path.isdir(self.log_path):
                 with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
                     pickle.dump(output, f)
-            output = MessageFormat(source_id=self.worker_id, payload=output)
+            # output = MessageFormat(source_id=self.worker_id, payload=output)
             self.producer.send(output)
             self.consumer.acknowledge(msg)
             return output.payload

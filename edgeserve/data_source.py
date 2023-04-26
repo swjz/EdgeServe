@@ -10,9 +10,9 @@ from edgeserve.message_format import MessageFormat
 class DataSource:
     def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', log_path=None, log_filename=None):
         self.client = pulsar.Client(pulsar_node)
-        self.producer = self.client.create_producer(topic, schema=AvroSchema(MessageFormat))
+        self.producer = self.client.create_producer(topic, schema=pulsar.schema.BytesSchema())
         self.stream = iter(stream)
-        self.gate = (lambda x: x.encode('utf-8')) if gate is None else gate
+        self.gate = (lambda x: x) if gate is None else gate
         self.source_id = source_id
         self.log_path = log_path
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
@@ -29,7 +29,8 @@ class DataSource:
     def __next__(self):
         data = self.gate(next(self.stream))
         data_collection_time_ms = time.time() * 1000
-        message = MessageFormat(source_id=self.source_id, payload=data)
+        # message = MessageFormat(source_id=self.source_id, payload=data)
+        message = data
         msg_id = self.producer.send(message)
         msg_sent_time_ms = time.time() * 1000
 
