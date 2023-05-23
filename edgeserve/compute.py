@@ -146,7 +146,7 @@ class Compute:
             # output = MessageFormat(source_id=self.worker_id, payload=output)
             self.producer.send(output)
             self.consumer.acknowledge(msg)
-            return output.payload
+            return output
         else:
             # No output is given, no need to materialize
             self.consumer.acknowledge(msg)
