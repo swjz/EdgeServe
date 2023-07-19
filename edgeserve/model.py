@@ -29,7 +29,7 @@ class Model:
                  topic_in_data: str,
                  topic_in_signal: Optional[str],
                  topic_out_destination: str,
-                 topic_out_signal: str,
+                 topic_out_signal: Optional[str],
                  gate_in: Optional[Callable] = None,
                  gate_out: Optional[Callable] = None,
                  ftp: Optional[bool] = False,
@@ -49,7 +49,7 @@ class Model:
             topic_in_data: Pulsar topic of the input data stream.
             topic_in_signal: Pulsar topic of the input signal stream. When set to `None`, no signal stream is present.
             topic_out_destination: Pulsar topic of the output destination stream.
-            topic_out_signal: Pulsar topic of the output signal stream.
+            topic_out_signal: Pulsar topic of the output signal stream. When set to `None`, no signal stream is present.
             gate_in: The gating function applied to input data stream (but not the signal stream).
             gate_out: The gating function applied to output prediction stream (to the destination topic).
             ftp: When set to `True`, lazy routing mode is enabled.
@@ -65,7 +65,9 @@ class Model:
         self.client = pulsar.Client(pulsar_node)
         self.producer_destination = self.client.create_producer(topic_out_destination,
                                                                 schema=pulsar.schema.BytesSchema())
-        self.producer_signal = self.client.create_producer(topic_out_signal, schema=pulsar.schema.BytesSchema())
+        self.topic_out_signal = topic_out_signal
+        if topic_out_signal:
+            self.producer_signal = self.client.create_producer(topic_out_signal, schema=pulsar.schema.BytesSchema())
         self.consumer = self.client.subscribe([topic_in_data, topic_in_signal], subscription_name='compute-sub',
                                               consumer_type=ConsumerType.Shared, schema=pulsar.schema.BytesSchema(),
                                               initial_position=InitialPosition.Earliest) if topic_in_signal else \
@@ -218,8 +220,10 @@ class Model:
                     pickle.dump(output, f)
             if is_satisfied:
                 self.producer_destination.send(output)
-            else:
+            elif self.topic_out_signal:
                 self.producer_signal.send(output)
+            else:
+                raise ValueError("The result is not satisfactory but output signal topic is not present.")
             self.consumer.acknowledge(msg)
             return output
         else:
