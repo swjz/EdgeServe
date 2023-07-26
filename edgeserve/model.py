@@ -219,9 +219,9 @@ class Model:
                 with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
                     pickle.dump(output, f)
             if is_satisfied:
-                self.producer_destination.send(output)
+                self.producer_destination.send(MessageFormat(source_id=flow_id, payload=output))
             elif self.topic_out_signal:
-                self.producer_signal.send(output)
+                self.producer_signal.send(MessageFormat(source_id=flow_id, payload=output))
             else:
                 raise ValueError("The result is not satisfactory but output signal topic is not present.")
             self.consumer.acknowledge(msg)
