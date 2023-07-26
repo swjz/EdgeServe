@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import pulsar
 import pickle
@@ -105,7 +105,7 @@ class Model:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.client.close()
 
-    def _try_task(self, flow_id) -> tuple[bool, Optional[bool], Optional[bytes]]:
+    def _try_task(self, flow_id) -> Tuple[bool, Optional[bool], Optional[bytes]]:
         """Performs actual computation.
 
         Args:
