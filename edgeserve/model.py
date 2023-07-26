@@ -184,7 +184,7 @@ class Model:
         msg_id = msg.message_id()
         value = msg.value()
         flow_id = value.source_id
-        actual_topic_in = msg.topic_name()
+        actual_topic_in = msg.topic_name().split('/')[-1]
 
         if actual_topic_in == self.topic_in_signal:
             # We locally cache the prediction result ("signal") from another model.
@@ -192,7 +192,9 @@ class Model:
         elif actual_topic_in == self.topic_in_data:
             self.cached_data[flow_id] = self.gate_in(value.payload)
         else:
-            raise ValueError("The consumer's topic name does not match that of incoming message")
+            raise ValueError(
+                "The consumer's topic name does not match that of incoming message. The topic of incoming message is",
+                actual_topic_in)
 
         if flow_id not in self.latest_msg_publish_time_ms:
             self.latest_msg_publish_time_ms[flow_id] = [msg.publish_timestamp()]
