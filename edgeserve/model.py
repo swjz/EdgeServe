@@ -64,16 +64,19 @@ class Model:
         """
         self.client = pulsar.Client(pulsar_node)
         self.producer_destination = self.client.create_producer(topic_out_destination,
-                                                                schema=pulsar.schema.BytesSchema())
+                                                                schema=pulsar.schema.AvroSchema(MessageFormat))
         self.topic_out_signal = topic_out_signal
         if topic_out_signal:
-            self.producer_signal = self.client.create_producer(topic_out_signal, schema=pulsar.schema.BytesSchema())
-        self.consumer = self.client.subscribe([topic_in_data, topic_in_signal], subscription_name='compute-sub',
-                                              consumer_type=ConsumerType.Shared, schema=pulsar.schema.BytesSchema(),
+            self.producer_signal = self.client.create_producer(topic_out_signal,
+                                                               schema=pulsar.schema.AvroSchema(MessageFormat))
+        self.consumer = self.client.subscribe([topic_in_data, topic_in_signal],
+                                              subscription_name='compute-sub',
+                                              consumer_type=ConsumerType.Shared,
+                                              schema=pulsar.schema.AvroSchema(MessageFormat),
                                               initial_position=InitialPosition.Earliest) if topic_in_signal else \
             self.client.subscribe(
                 topic_in_data, subscription_name='compute-sub', consumer_type=ConsumerType.Shared,
-                schema=pulsar.schema.BytesSchema(), initial_position=InitialPosition.Earliest)
+                schema=pulsar.schema.AvroSchema(MessageFormat), initial_position=InitialPosition.Earliest)
 
         self.task = task
         self.topic_in_data = topic_in_data
@@ -180,7 +183,7 @@ class Model:
         msg = self.consumer.receive()
         msg_id = msg.message_id()
         value = msg.value()
-        flow_id = value.flow_id
+        flow_id = value.source_id
         actual_topic_in = msg.topic_name()
 
         if actual_topic_in == self.topic_in_signal:
