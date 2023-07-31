@@ -6,11 +6,9 @@ import pulsar
 import pickle
 import pathlib
 from _pulsar import InitialPosition, ConsumerType
-from pulsar.schema import AvroSchema
-from inspect import signature
 
 from edgeserve.util import ftp_fetch, local_to_global_path
-from edgeserve.message_format import MessageFormat
+from edgeserve.message_format import NetworkCodec
 
 
 # This version intentionally drops schema support. Data sources cannot be combined adaptively.
@@ -64,19 +62,19 @@ class Model:
         """
         self.client = pulsar.Client(pulsar_node)
         self.producer_destination = self.client.create_producer(topic_out_destination,
-                                                                schema=pulsar.schema.AvroSchema(MessageFormat))
+                                                                schema=pulsar.schema.BytesSchema())
         self.topic_out_signal = topic_out_signal
         if topic_out_signal:
             self.producer_signal = self.client.create_producer(topic_out_signal,
-                                                               schema=pulsar.schema.AvroSchema(MessageFormat))
+                                                               schema=pulsar.schema.BytesSchema())
         self.consumer = self.client.subscribe([topic_in_data, topic_in_signal],
                                               subscription_name='compute-sub',
                                               consumer_type=ConsumerType.Shared,
-                                              schema=pulsar.schema.AvroSchema(MessageFormat),
+                                              schema=pulsar.schema.BytesSchema(),
                                               initial_position=InitialPosition.Earliest) if topic_in_signal else \
             self.client.subscribe(
                 topic_in_data, subscription_name='compute-sub', consumer_type=ConsumerType.Shared,
-                schema=pulsar.schema.AvroSchema(MessageFormat), initial_position=InitialPosition.Earliest)
+                schema=pulsar.schema.BytesSchema(), initial_position=InitialPosition.Earliest)
 
         self.task = task
         self.topic_in_data = topic_in_data
@@ -99,6 +97,7 @@ class Model:
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
         self.last_log_duration_ms = -1
 
+        self.network_codec = NetworkCodec(header_size=32)
         self.cached_data = dict()
         self.cached_signals = dict()
 
@@ -183,14 +182,14 @@ class Model:
         msg = self.consumer.receive()
         msg_id = msg.message_id()
         value = msg.value()
-        flow_id = value.source_id
+        flow_id, payload = self.network_codec.decode(value)
         actual_topic_in = msg.topic_name().split('/')[-1]
 
         if actual_topic_in == self.topic_in_signal:
             # We locally cache the prediction result ("signal") from another model.
-            self.cached_signals[flow_id] = value.payload
+            self.cached_signals[flow_id] = payload
         elif actual_topic_in == self.topic_in_data:
-            self.cached_data[flow_id] = self.gate_in(value.payload)
+            self.cached_data[flow_id] = self.gate_in(payload)
         else:
             raise ValueError(
                 "The consumer's topic name does not match that of incoming message. The topic of incoming message is",
@@ -224,9 +223,9 @@ class Model:
                 with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
                     pickle.dump(output, f)
             if is_satisfied:
-                self.producer_destination.send(MessageFormat(source_id=flow_id, payload=output))
+                self.producer_destination.send(self.network_codec.encode([flow_id, output]))
             elif self.topic_out_signal:
-                self.producer_signal.send(MessageFormat(source_id=flow_id, payload=output))
+                self.producer_signal.send(self.network_codec.encode([flow_id, output]))
             else:
                 raise ValueError("The result is not satisfactory but output signal topic is not present.")
             self.consumer.acknowledge(msg)
