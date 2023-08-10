@@ -30,6 +30,7 @@ class Model:
                  topic_out_signal: Optional[str] = None,
                  gate_in: Optional[Callable] = None,
                  gate_out: Optional[Callable] = None,
+                 header_size: Optional[int] = None,
                  ftp: Optional[bool] = False,
                  ftp_memory: Optional[bool] = False,
                  ftp_delete: Optional[bool] = False,
@@ -97,7 +98,8 @@ class Model:
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
         self.last_log_duration_ms = -1
 
-        self.network_codec = NetworkCodec(header_size=32)
+        self.header_size = header_size if header_size else 32
+        self.network_codec = NetworkCodec(header_size=self.header_size)
         self.cached_data = dict()
         self.cached_signals = dict()
 
