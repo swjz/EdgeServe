@@ -79,7 +79,9 @@ class BatchCompute:
 
     def __next__(self):
         messages = self.consumer.batch_receive()
-        msgs = [self.gate_in(msg.value()) for msg in messages]
+        while len(messages) == 0:
+            messages = self.consumer.batch_receive()
+        msgs = [self.gate_in(msg.data()) for msg in messages]
 
         if self.ftp and not self.ftp_memory:  # FTP file mode
             # download the file from FTP server and then delete the file from server
