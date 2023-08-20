@@ -39,7 +39,8 @@ class Model:
                  no_overlap: Optional[bool] = False,
                  min_interval_ms: Optional[int] = 0,
                  log_path: Optional[str] = None,
-                 log_filename: Optional[str] = None) -> None:
+                 log_filename: Optional[str] = None,
+                 acknowledge: Optional[bool] = False) -> None:
         """Initializes a model.
 
         Args:
@@ -97,6 +98,7 @@ class Model:
         self.log_path = log_path
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
         self.last_log_duration_ms = -1
+        self.acknowledge = acknowledge
 
         self.header_size = header_size if header_size else 32
         self.network_codec = NetworkCodec(header_size=self.header_size)
@@ -230,9 +232,8 @@ class Model:
                 self.producer_signal.send(self.network_codec.encode([flow_id, output]))
             else:
                 raise ValueError("The result is not satisfactory but output signal topic is not present.")
+
+        if self.acknowledge:
             self.consumer.acknowledge(msg)
-            return output
-        else:
-            # No output is given, no need to materialize
-            self.consumer.acknowledge(msg)
-            return None
+
+        return output if output else None
