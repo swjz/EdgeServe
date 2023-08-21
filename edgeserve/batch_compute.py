@@ -14,7 +14,7 @@ class BatchCompute:
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp=False, ftp_memory=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
                  max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None,
-                 batch_max_num_msg=100, batch_max_bytes=10 * 1024 * 1024, batch_timeout_ms=10, acknowledge=False):
+                 acknowledge=False, batch_max_num_msg=100, batch_max_bytes=10 * 1024 * 1024, batch_timeout_ms=10):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=pulsar.schema.BytesSchema())
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
@@ -57,6 +57,8 @@ class BatchCompute:
         # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
         if self.ftp:
             for i, msg in enumerate(msgs):
+                if not msg.startswith('ftp://'):
+                    raise ValueError("FTP mode is enabled but incoming message does not have FTP format")
                 local_file_path = ftp_fetch(msg, self.local_ftp_path, memory=self.ftp_memory, delete=self.ftp_delete)
                 msgs[i] = local_file_path
 
@@ -71,6 +73,7 @@ class BatchCompute:
             with open(os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp', 'w') as f:
                 f.write(output)
             output = os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp'
+            output = local_to_global_path(output, self.local_ftp_path)
 
         return True, output
 
@@ -83,20 +86,9 @@ class BatchCompute:
             messages = self.consumer.batch_receive()
         msgs = [self.gate_in(msg.data()) for msg in messages]
 
-        if self.ftp and not self.ftp_memory:  # FTP file mode
-            # download the file from FTP server and then delete the file from server
-            for msg in msgs:
-                if not msg.startswith('ftp://'):
-                    return None
-            ret, output = self._try_task(msgs)
-            if ret:
-                global_file_path = local_to_global_path(output, self.local_ftp_path)
-                output = self.gate_out(global_file_path)
-        else:
-            # memory mode
-            ret, output = self._try_task(msgs)
-            if ret:
-                output = self.gate_out(output)
+        ret, output = self._try_task(msgs)
+        if ret:
+            output = self.gate_out(output)
 
         if output:
             if self.log_path and os.path.isdir(self.log_path):

@@ -69,15 +69,7 @@ class Model:
         if topic_out_signal:
             self.producer_signal = self.client.create_producer(topic_out_signal,
                                                                schema=pulsar.schema.BytesSchema())
-        self.consumer = self.client.subscribe([topic_in_data, topic_in_signal],
-                                              subscription_name='compute-sub',
-                                              consumer_type=ConsumerType.Shared,
-                                              schema=pulsar.schema.BytesSchema(),
-                                              initial_position=InitialPosition.Earliest) if topic_in_signal else \
-            self.client.subscribe(
-                topic_in_data, subscription_name='compute-sub', consumer_type=ConsumerType.Shared,
-                schema=pulsar.schema.BytesSchema(), initial_position=InitialPosition.Earliest)
-
+        self.consumer = self._subscribe()
         self.task = task
         self.topic_in_data = topic_in_data
         self.topic_in_signal = topic_in_signal
@@ -104,6 +96,18 @@ class Model:
         self.network_codec = NetworkCodec(header_size=self.header_size)
         self.cached_data = dict()
         self.cached_signals = dict()
+
+    def _subscribe(self):
+        if self.topic_in_signal:
+            return self.client.subscribe([self.topic_in_data, self.topic_in_signal],
+                                         subscription_name='compute-sub',
+                                         consumer_type=ConsumerType.Shared,
+                                         schema=pulsar.schema.BytesSchema(),
+                                         initial_position=InitialPosition.Earliest)
+
+        return self.client.subscribe(self.topic_in_data, subscription_name='compute-sub',
+                                     consumer_type=ConsumerType.Shared, schema=pulsar.schema.BytesSchema(),
+                                     initial_position=InitialPosition.Earliest)
 
     def __enter__(self):
         return self
@@ -136,6 +140,8 @@ class Model:
 
         # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
         if self.ftp:
+            if not self.cached_data[flow_id].startswith('ftp://'):
+                raise ValueError("FTP mode is enabled but incoming message does not have FTP format")
             local_file_path = ftp_fetch(self.cached_data[flow_id], self.local_ftp_path, memory=self.ftp_memory,
                                         delete=self.ftp_delete)
             self.cached_data[flow_id] = local_file_path
@@ -146,45 +152,64 @@ class Model:
             is_satisfied, output = self.task(self.cached_data[flow_id])
         last_run_finish_ms = time.time() * 1000
 
-        # For now, use the completion timestamp as the filename of output FTP file
         if self.ftp and not self.ftp_memory:
-            ftp_output_dir = os.path.join(os.path.dirname(local_file_path), 'ftp_output')
-            pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
-            with open(os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp', 'w') as f:
-                f.write(output)
-            output = os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp'
+            output = self._write_ftp(output, local_file_path, last_run_finish_ms)
 
         # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            replay_log = {'msg_id': self.latest_msg_id,
-                          'msg_publish_time_ms': self.latest_msg_publish_time_ms,
-                          'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
-                          'start_compute_time_ms': self.last_run_start_ms,
-                          'finish_compute_time_ms': last_run_finish_ms,
-                          'last_log_duration_ms': self.last_log_duration_ms,
-                          'data_payload': self.cached_data[flow_id],
-                          'signal_payload': self.cached_signals[flow_id] if self.topic_in_signal else None}
-            with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
-                pickle.dump(replay_log, f)
-            self.last_log_duration_ms = time.time() * 1000 - last_run_finish_ms
+            self._log_aggregation_decisions(flow_id, last_run_finish_ms)
+
+        self._clear_cache(flow_id)
+        return True, is_satisfied, output
+
+    def _write_ftp(self, output, local_file_path, last_run_finish_ms):
+        # For now, use the completion timestamp as the filename of output FTP file
+        ftp_output_dir = os.path.join(os.path.dirname(local_file_path), 'ftp_output')
+        pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
+        with open(os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp', 'w') as f:
+            f.write(output)
+        output = os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp'
+        return local_to_global_path(output, self.local_ftp_path)
+
+    def _clear_cache(self, flow_id):
+        del self.cached_data[flow_id]
+        if self.topic_in_signal:
+            del self.cached_signals[flow_id]
+
+    def _log_incoming_msg(self, flow_id, msg):
+        self.latest_msg_consumed_time_ms[flow_id] = time.time() * 1000
+        msg_id = msg.message_id()
+        if flow_id not in self.latest_msg_publish_time_ms:
+            self.latest_msg_publish_time_ms[flow_id] = [msg.publish_timestamp()]
+            self.latest_msg_id[flow_id] = [msg_id.serialize()]
+        else:
+            self.latest_msg_publish_time_ms[flow_id].append(msg.publish_timestamp())
+            self.latest_msg_id[flow_id].append(msg_id.serialize())
+
+    def _log_aggregation_decisions(self, flow_id, last_run_finish_ms):
+        replay_log = {'msg_id': self.latest_msg_id,
+                      'msg_publish_time_ms': self.latest_msg_publish_time_ms,
+                      'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
+                      'start_compute_time_ms': self.last_run_start_ms,
+                      'finish_compute_time_ms': last_run_finish_ms,
+                      'last_log_duration_ms': self.last_log_duration_ms,
+                      'data_payload': self.cached_data[flow_id],
+                      'signal_payload': self.cached_signals[flow_id] if self.topic_in_signal else None}
+        with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
+            pickle.dump(replay_log, f)
+        self.last_log_duration_ms = time.time() * 1000 - last_run_finish_ms
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
             self.latest_msg_id = dict()
             self.latest_msg_publish_time_ms = dict()
             self.latest_msg_consumed_time_ms = dict()
-            del self.cached_data[flow_id]
-            if self.topic_in_signal:
-                del self.cached_signals[flow_id]
-
-        return True, is_satisfied, output
 
     def __iter__(self):
         return self
 
     def __next__(self):
         msg = self.consumer.receive()
-        msg_id = msg.message_id()
         value = msg.value()
         flow_id, payload = self.network_codec.decode(value)
         actual_topic_in = msg.topic_name().split('/')[-1]
@@ -199,28 +224,12 @@ class Model:
                 "The consumer's topic name does not match that of incoming message. The topic of incoming message is",
                 actual_topic_in)
 
-        if flow_id not in self.latest_msg_publish_time_ms:
-            self.latest_msg_publish_time_ms[flow_id] = [msg.publish_timestamp()]
-            self.latest_msg_id[flow_id] = [msg_id.serialize()]
-        else:
-            self.latest_msg_publish_time_ms[flow_id].append(msg.publish_timestamp())
-            self.latest_msg_id[flow_id].append(msg_id.serialize())
+        if self.log_path and os.path.isdir(self.log_path):
+            self._log_incoming_msg(flow_id, msg)
 
-        self.latest_msg_consumed_time_ms[flow_id] = time.time() * 1000
-
-        if self.ftp and not self.ftp_memory:  # FTP file mode
-            # download the file from FTP server and then delete the file from server
-            if not self.cached_data[flow_id].startswith('ftp://'):
-                raise ValueError("FTP mode is enabled but incoming message does not have FTP format")
-            is_performed, is_satisfied, output = self._try_task(flow_id)
-            if is_performed:
-                global_file_path = local_to_global_path(output, self.local_ftp_path)
-                output = self.gate_out(global_file_path)
-        else:
-            # memory mode
-            is_performed, is_satisfied, output = self._try_task(flow_id)
-            if is_performed:
-                output = self.gate_out(output)
+        is_performed, is_satisfied, output = self._try_task(flow_id)
+        if is_performed:
+            output = self.gate_out(output)
 
         if output:
             if self.log_path and os.path.isdir(self.log_path):
