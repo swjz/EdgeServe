@@ -28,8 +28,10 @@ class Model:
                  topic_out_destination: str,
                  topic_in_signal: Optional[str] = None,
                  topic_out_signal: Optional[str] = None,
-                 gate_in: Optional[Callable] = None,
-                 gate_out: Optional[Callable] = None,
+                 gate_in_data: Optional[Callable] = None,
+                 gate_out_destination: Optional[Callable] = None,
+                 gate_in_signal: Optional[Callable] = None,
+                 gate_out_signal: Optional[Callable] = None,
                  header_size: Optional[int] = None,
                  ftp: Optional[bool] = False,
                  ftp_memory: Optional[bool] = False,
@@ -50,8 +52,10 @@ class Model:
             topic_in_signal: Pulsar topic of the input signal stream. When set to `None`, no signal stream is present.
             topic_out_destination: Pulsar topic of the output destination stream.
             topic_out_signal: Pulsar topic of the output signal stream. When set to `None`, no signal stream is present.
-            gate_in: The gating function applied to input data stream (but not the signal stream).
-            gate_out: The gating function applied to output prediction stream (to the destination topic).
+            gate_in_data: The gating function applied to input data stream (but not the signal stream).
+            gate_out_destination: The gating function applied to output prediction stream (to the destination topic).
+            gate_in_signal: The gating function applied to input signal stream.
+            gate_out_signal: The gating function applied to output signal stream.
             ftp: When set to `True`, lazy routing mode is enabled.
             ftp_memory: When set to `True`, in-memory lazy routing mode is enabled. Only effective when `ftp=True`.
             ftp_delete: When set to `True`, delete remote data after fetching is complete. Only effective when `ftp=True`.
@@ -69,12 +73,14 @@ class Model:
         if topic_out_signal:
             self.producer_signal = self.client.create_producer(topic_out_signal,
                                                                schema=pulsar.schema.BytesSchema())
-        self.consumer = self._subscribe()
         self.task = task
         self.topic_in_data = topic_in_data
         self.topic_in_signal = topic_in_signal
-        self.gate_in = (lambda x: x) if gate_in is None else gate_in
-        self.gate_out = (lambda x: x) if gate_out is None else gate_out
+        self.consumer = self._subscribe()
+        self.gate_in_data = (lambda x: x) if gate_in_data is None else gate_in_data
+        self.gate_out_destination = (lambda x: x) if gate_out_destination is None else gate_out_destination
+        self.gate_in_signal = (lambda x: x) if gate_in_signal is None else gate_in_signal
+        self.gate_out_signal = (lambda x: x) if gate_out_signal is None else gate_out_signal
         self.ftp = ftp  # consider changing this name to ftp_in
         self.local_ftp_path = local_ftp_path
         self.ftp_memory = ftp_memory  # consider changing this name to (negate) ftp_out
@@ -216,9 +222,9 @@ class Model:
 
         if actual_topic_in == self.topic_in_signal:
             # We locally cache the prediction result ("signal") from another model.
-            self.cached_signals[flow_id] = payload
+            self.cached_signals[flow_id] = self.gate_in_signal(payload)
         elif actual_topic_in == self.topic_in_data:
-            self.cached_data[flow_id] = self.gate_in(payload)
+            self.cached_data[flow_id] = self.gate_in_data(payload)
         else:
             raise ValueError(
                 "The consumer's topic name does not match that of incoming message. The topic of incoming message is",
@@ -229,7 +235,9 @@ class Model:
 
         is_performed, is_satisfied, output = self._try_task(flow_id)
         if is_performed:
-            output = self.gate_out(output)
+            output = self.gate_out_destination(output)
+        else:
+            output = self.gate_out_signal(output)
 
         if output:
             if self.log_path and os.path.isdir(self.log_path):
