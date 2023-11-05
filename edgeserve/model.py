@@ -220,15 +220,15 @@ class Model:
         flow_id, payload = self.network_codec.decode(value)
         actual_topic_in = msg.topic_name().split('/')[-1]
 
-        if actual_topic_in == self.topic_in_signal:
+        if actual_topic_in == self.topic_in_signal or msg.topic_name() == self.topic_in_signal:
             # We locally cache the prediction result ("signal") from another model.
             self.cached_signals[flow_id] = self.gate_in_signal(payload)
-        elif actual_topic_in == self.topic_in_data:
+        elif actual_topic_in == self.topic_in_data or msg.topic_name() == self.topic_in_data:
             self.cached_data[flow_id] = self.gate_in_data(payload)
         else:
             raise ValueError(
                 "The consumer's topic name does not match that of incoming message. The topic of incoming message is",
-                actual_topic_in)
+                msg.topic_name())
 
         if self.log_path and os.path.isdir(self.log_path):
             self._log_incoming_msg(flow_id, msg)
