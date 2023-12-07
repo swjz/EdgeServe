@@ -71,14 +71,15 @@ class Compute:
         # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
         if self.ftp:
             for source_id in self.latest_msg.keys():
-                local_file_path = ftp_fetch(self.latest_msg[source_id], self.local_ftp_path, memory=self.ftp_memory, delete=self.ftp_delete)
-                self.latest_msg[source_id] = local_file_path
+                if 'ftp://' in self.latest_msg[source_id]:
+                    local_file_path = ftp_fetch(self.latest_msg[source_id], self.local_ftp_path, memory=self.ftp_memory, delete=self.ftp_delete)
+                    self.latest_msg[source_id] = local_file_path
 
         output = self.task(**self.latest_msg)
         last_run_finish_ms = time.time() * 1000
 
         # For now, use the completion timestamp as the filename of output FTP file
-        if self.ftp and not self.ftp_memory:
+        if self.ftp and not self.ftp_memory and output:
             ftp_output_dir = os.path.join(os.path.dirname(local_file_path), 'ftp_output')
             pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
             with open(os.path.join(ftp_output_dir, str(last_run_finish_ms)) + '.ftp', 'w') as f:
@@ -136,7 +137,7 @@ class Compute:
                 return None
             self.latest_msg[source_id] = data
             ret, output = self._try_task()
-            if ret:
+            if ret and output:
                 global_file_path = local_to_global_path(output, self.local_ftp_path)
                 output = self.gate_out(global_file_path)
         else:
@@ -144,7 +145,7 @@ class Compute:
                 self.latest_msg[source_id] = data
             # memory mode
             ret, output = self._try_task()
-            if ret:
+            if ret and output:
                 output = self.gate_out(output)
 
         if output:
