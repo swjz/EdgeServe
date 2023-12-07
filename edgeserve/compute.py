@@ -14,7 +14,8 @@ from edgeserve.message_format import MessageFormat
 class Compute:
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp=False, ftp_memory=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
-                 max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None):
+                 max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None,
+                 drop_if_older_than_ms=None):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=AvroSchema(MessageFormat))
         self.consumer = self.client.subscribe(topic_in, subscription_name='compute-sub',
@@ -39,6 +40,7 @@ class Compute:
         self.last_run_start_ms = 0
         self.log_path = log_path
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
+        self.drop_if_older_than = drop_if_older_than_ms
         self.last_log_duration_ms = -1
 
     def __enter__(self):
@@ -110,6 +112,14 @@ class Compute:
 
     def __next__(self):
         msg = self.consumer.receive()
+
+        if self.drop_if_older_than is not None:
+            assert isinstance(self.drop_if_older_than, int)
+            if msg.publish_timestamp() + self.drop_if_older_than < time.time() * 1000:
+                # incoming message is too old, skip it.
+                self.consumer.acknowledge(msg)
+                return None
+
         msg_id = msg.message_id()
         value = msg.value()
         source_id = value.source_id
