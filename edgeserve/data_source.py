@@ -27,7 +27,12 @@ class DataSource:
         return self
 
     def __next__(self):
-        data = self.gate(next(self.stream))
+        incoming = next(self.stream)
+        if incoming is None:
+            return None
+        data = self.gate(incoming)
+        if data is None:
+            return None
         data_collection_time_ms = time.time() * 1000
         message = MessageFormat(source_id=self.source_id, payload=data)
         msg_id = self.producer.send(message)
