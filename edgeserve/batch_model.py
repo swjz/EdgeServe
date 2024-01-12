@@ -29,8 +29,10 @@ class BatchModel(Model):
                  topic_out_destination: str,
                  topic_in_signal: Optional[str] = None,
                  topic_out_signal: Optional[str] = None,
-                 gate_in: Optional[Callable] = None,
-                 gate_out: Optional[Callable] = None,
+                 gate_in_data: Optional[Callable] = None,
+                 gate_out_destination: Optional[Callable] = None,
+                 gate_in_signal: Optional[Callable] = None,
+                 gate_out_signal: Optional[Callable] = None,
                  header_size: Optional[int] = None,
                  ftp: Optional[bool] = False,
                  ftp_memory: Optional[bool] = False,
@@ -59,8 +61,10 @@ class BatchModel(Model):
             topic_in_signal: Pulsar topic of the input signal stream. When set to `None`, no signal stream is present.
             topic_out_destination: Pulsar topic of the output destination stream.
             topic_out_signal: Pulsar topic of the output signal stream. When set to `None`, no signal stream is present.
-            gate_in: The gating function applied to input data stream (but not the signal stream).
-            gate_out: The gating function applied to output prediction stream (to the destination topic).
+            gate_in_data: The gating function applied to input data stream (but not the signal stream).
+            gate_out_destination: The gating function applied to output prediction stream (to the destination topic).
+            gate_in_signal: The gating function applied to input signal stream.
+            gate_out_signal: The gating function applied to output signal stream.
             ftp: When set to `True`, lazy routing mode is enabled.
             ftp_memory: When set to `True`, in-memory lazy routing mode is enabled. Only effective when `ftp=True`.
             ftp_delete: When set to `True`, delete remote data after fetching is complete. Only effective when `ftp=True`.
@@ -75,8 +79,9 @@ class BatchModel(Model):
             batch_timeout_ms: The maximum timeout to wait (in ms) for enough messages for this batch.
         """
         super().__init__(task, pulsar_node, topic_in_data, topic_out_destination, topic_in_signal, topic_out_signal,
-                         gate_in, gate_out, header_size, ftp, ftp_memory, ftp_delete, local_ftp_path, max_time_diff_ms,
-                         no_overlap, min_interval_ms, log_path, log_filename, acknowledge)
+                         gate_in_data, gate_out_destination, gate_in_signal, gate_out_signal, header_size, ftp,
+                         ftp_memory, ftp_delete, local_ftp_path, max_time_diff_ms, no_overlap, min_interval_ms,
+                         log_path, log_filename, acknowledge)
         self.batch_max_num_msg = batch_max_num_msg
         self.batch_max_bytes = batch_max_bytes
         self.batch_timeout_ms = batch_timeout_ms
@@ -176,15 +181,15 @@ class BatchModel(Model):
             flow_id, payload = self.network_codec.decode(msg.data())
             actual_topic_in = msg.topic_name().split('/')[-1]
 
-            if actual_topic_in == self.topic_in_signal:
+            if actual_topic_in == self.topic_in_signal or msg.topic_name() == self.topic_in_signal:
                 # We locally cache the prediction result ("signal") from another model.
-                self.cached_signals[flow_id] = payload
-            elif actual_topic_in == self.topic_in_data:
-                self.cached_data[flow_id] = self.gate_in(payload)
+                self.cached_signals[flow_id] = self.gate_in_signal(payload)
+            elif actual_topic_in == self.topic_in_data or msg.topic_name() == self.topic_in_data:
+                self.cached_data[flow_id] = self.gate_in_data(payload)
             else:
                 raise ValueError(
                     "The consumer's topic name does not match that of incoming message. "
-                    "The topic of incoming message is", actual_topic_in)
+                    "The topic of incoming message is", msg.topic_name())
 
             flow_ids.add(flow_id)
 
@@ -202,7 +207,8 @@ class BatchModel(Model):
             if not outputs[flow_id]:
                 continue
             do_return = True
-            output = self.gate_out(outputs[flow_id])
+            output = self.gate_out_destination(outputs[flow_id]) if is_satisfied[flow_id] else self.gate_out_signal(
+                outputs[flow_id])
             if self.log_path and os.path.isdir(self.log_path):
                 with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
                     pickle.dump(output, f)
