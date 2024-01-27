@@ -42,7 +42,8 @@ class Model:
                  min_interval_ms: Optional[int] = 0,
                  log_path: Optional[str] = None,
                  log_filename: Optional[str] = None,
-                 acknowledge: Optional[bool] = False) -> None:
+                 acknowledge: Optional[bool] = False,
+                 receiver_queue_size: Optional[int] = 10000) -> None:
         """Initializes a model.
 
         Args:
@@ -65,6 +66,8 @@ class Model:
             min_interval_ms: The minimum time interval between two consecutive runs.
             log_path: Path to store the replay log. When set to `None`, log is disabled.
             log_filename: File name of replay log. When set to `None`, the current timestamp is used as file name.
+            acknowledge: When set to `True`, the model acknowledges every message it receives.
+            receiver_queue_size: The size of the receiver queue for Pulsar.
         """
         self.client = pulsar.Client(pulsar_node)
         self.producer_destination = self.client.create_producer(topic_out_destination,
@@ -97,6 +100,7 @@ class Model:
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
         self.last_log_duration_ms = -1
         self.acknowledge = acknowledge
+        self.receiver_queue_size = receiver_queue_size
 
         self.header_size = header_size if header_size else 32
         self.network_codec = NetworkCodec(header_size=self.header_size)
@@ -109,11 +113,13 @@ class Model:
                                          subscription_name='compute-sub',
                                          consumer_type=ConsumerType.Shared,
                                          schema=pulsar.schema.BytesSchema(),
-                                         initial_position=InitialPosition.Earliest)
+                                         initial_position=InitialPosition.Earliest,
+                                         receiver_queue_size=self.receiver_queue_size)
 
         return self.client.subscribe(self.topic_in_data, subscription_name='compute-sub',
                                      consumer_type=ConsumerType.Shared, schema=pulsar.schema.BytesSchema(),
-                                     initial_position=InitialPosition.Earliest)
+                                     initial_position=InitialPosition.Earliest,
+                                     receiver_queue_size=self.receiver_queue_size)
 
     def __enter__(self):
         return self
