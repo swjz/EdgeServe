@@ -5,7 +5,7 @@ import pytest
 data_source_code = """
 from edgeserve.data_source import DataSource
 node = 'pulsar://localhost:6650'
-stream = ['Hello World!']
+stream = [b'Hello World!']
 with DataSource(stream, node, source_id='data', topic='data') as data_source:
     next(data_source)
 print('Done!', flush=True)
@@ -15,7 +15,8 @@ compute_code = """
 from edgeserve.compute import Compute
 node = 'pulsar://localhost:6650'
 task = lambda data: data
-with Compute(task, node, topic_in='data') as compute:
+with Compute(task, node, topic_in='data', gate_in=lambda x: x.decode('utf-8'),
+             gate_out=lambda x: x.encode('utf-8')) as compute:
     assert next(compute) == b'Hello World!'
 print('Done!', flush=True)
 """

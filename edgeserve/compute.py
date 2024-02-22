@@ -1,16 +1,17 @@
 import os
 import time
+import uuid
+
 import pulsar
 import pickle
 import pathlib
 from _pulsar import InitialPosition, ConsumerType
-from pulsar.schema import AvroSchema
 from inspect import signature
 
 from edgeserve.util import ftp_fetch, local_to_global_path
-from edgeserve.message_format import MessageFormat
+from edgeserve.message_format import GraphCodec
 
-# This version intentionally drops schema support. Data sources cannot be combined adaptively.
+
 class Compute:
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp=False, ftp_memory=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
@@ -31,7 +32,7 @@ class Compute:
         self.ftp_memory = ftp_memory  # consider changing this name to (negate) ftp_out
         self.ftp_delete = ftp_delete
         self.latest_msg = dict()
-        self.latest_msg_id = dict()
+        self.latest_msg_in_uuid = dict()
         self.latest_msg_publish_time_ms = dict()
         self.latest_msg_consumed_time_ms = dict()
         self.max_time_diff_ms = max_time_diff_ms
@@ -40,8 +41,9 @@ class Compute:
         self.last_run_start_ms = 0
         self.log_path = log_path
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
-        self.drop_if_older_than = drop_if_older_than_ms
+        self.drop_if_older_than_ms = drop_if_older_than_ms
         self.last_log_duration_ms = -1
+        self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
 
     def __enter__(self):
         return self
@@ -77,6 +79,7 @@ class Compute:
 
         output = self.task(**self.latest_msg)
         last_run_finish_ms = time.time() * 1000
+        msg_out_uuid = uuid.uuid4()
 
         # For now, use the completion timestamp as the filename of output FTP file
         if self.ftp and not self.ftp_memory and output:
@@ -88,13 +91,15 @@ class Compute:
 
         # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            replay_log = {'msg_id': self.latest_msg_id,
+            replay_log = {'msg_in_uuid': self.latest_msg_in_uuid,
+                          'msg_in_payload': self.latest_msg,
+                          'msg_out_uuid': msg_out_uuid,
+                          'msg_out_payload': output,
                           'msg_publish_time_ms': self.latest_msg_publish_time_ms,
                           'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
                           'start_compute_time_ms': self.last_run_start_ms,
                           'finish_compute_time_ms': last_run_finish_ms,
-                          'last_log_duration_ms': self.last_log_duration_ms,
-                          'msg_payload': self.latest_msg}
+                          'last_log_duration_ms': self.last_log_duration_ms}
             with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
                 pickle.dump(replay_log, f)
             self.last_log_duration_ms = time.time() * 1000 - last_run_finish_ms
@@ -102,51 +107,48 @@ class Compute:
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
             self.latest_msg = dict()
-            self.latest_msg_id = dict()
+            self.latest_msg_in_uuid = dict()
             self.latest_msg_publish_time_ms = dict()
             self.latest_msg_consumed_time_ms = dict()
 
-        return True, output
+        return True, msg_out_uuid, output
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        msg = self.consumer.receive()
+        msg_in = self.consumer.receive()
 
-        if self.drop_if_older_than is not None:
-            assert isinstance(self.drop_if_older_than, int)
-            if msg.publish_timestamp() + self.drop_if_older_than < time.time() * 1000:
+        if self.drop_if_older_than_ms is not None:
+            assert isinstance(self.drop_if_older_than_ms, int)
+            if msg_in.publish_timestamp() + self.drop_if_older_than_ms < time.time() * 1000:
                 # incoming message is too old, skip it.
-                self.consumer.acknowledge(msg)
+                self.consumer.acknowledge(msg_in)
                 return None
 
-        msg_id = msg.message_id()
-        value = msg.value()
-        # source_id = value.source_id
-        # data = self.gate_in(value.payload)  # path to file if ftp, raw data in bytes otherwise
-        source_id = 'data'
-        data = self.gate_in(value)
+        msg_in_uuid, op_from, _, payload = self.graph_codec.decode(msg_in.value())
+
+        data = self.gate_in(payload)  # path to file if ftp, raw data in bytes otherwise
         if data is not None:
-            self.latest_msg_publish_time_ms[source_id] = msg.publish_timestamp()
-            self.latest_msg_consumed_time_ms[source_id] = time.time() * 1000
-            self.latest_msg[source_id] = data
-            self.latest_msg_id[source_id] = msg_id.serialize()
+            self.latest_msg_publish_time_ms[op_from] = msg_in.publish_timestamp()
+            self.latest_msg_consumed_time_ms[op_from] = time.time() * 1000
+            self.latest_msg[op_from] = data
+            self.latest_msg_in_uuid[op_from] = msg_in_uuid
 
         if self.ftp and not self.ftp_memory:  # FTP file mode
             # download the file from FTP server and then delete the file from server
             if not data.startswith('ftp://'):
                 return None
-            self.latest_msg[source_id] = data
-            ret, output = self._try_task()
+            self.latest_msg[op_from] = data
+            ret, msg_out_uuid, output = self._try_task()
             if ret and output:
                 global_file_path = local_to_global_path(output, self.local_ftp_path)
                 output = self.gate_out(global_file_path)
         else:
             if self.ftp:  # FTP memory mode
-                self.latest_msg[source_id] = data
+                self.latest_msg[op_from] = data
             # memory mode
-            ret, output = self._try_task()
+            ret, msg_out_uuid, output = self._try_task()
             if ret and output:
                 output = self.gate_out(output)
 
@@ -154,11 +156,13 @@ class Compute:
             if self.log_path and os.path.isdir(self.log_path):
                 with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
                     pickle.dump(output, f)
-            # output = MessageFormat(source_id=self.worker_id, payload=output)
-            self.producer.send(output)
-            self.consumer.acknowledge(msg)
+            if type(output) == str:
+                output = output.encode('utf-8')
+            msg_out = self.graph_codec.encode(msg_uuid=msg_out_uuid.bytes, op_from=self.worker_id, payload=output)
+            self.producer.send(msg_out)
+            self.consumer.acknowledge(msg_in)
             return output
         else:
             # No output is given, no need to materialize
-            self.consumer.acknowledge(msg)
+            self.consumer.acknowledge(msg_in)
             return None

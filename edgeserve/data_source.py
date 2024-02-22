@@ -3,8 +3,9 @@ from pulsar.schema import AvroSchema
 import time
 import os
 import pickle
+import uuid
 
-from edgeserve.message_format import MessageFormat
+from edgeserve.message_format import GraphCodec
 
 
 class DataSource:
@@ -13,9 +14,11 @@ class DataSource:
         self.producer = self.client.create_producer(topic, schema=pulsar.schema.BytesSchema())
         self.stream = iter(stream)
         self.gate = (lambda x: x) if gate is None else gate
+        assert len(source_id) <= 16, 'source_id must be at most 16 bytes long'
         self.source_id = source_id
         self.log_path = log_path
         self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
+        self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
 
     def __enter__(self):
         return self
@@ -34,14 +37,15 @@ class DataSource:
         if data is None:
             return None
         data_collection_time_ms = time.time() * 1000
-        # message = MessageFormat(source_id=self.source_id, payload=data)
-        message = data
-        msg_id = self.producer.send(message)
+
+        msg_uuid = uuid.uuid4()
+        message = self.graph_codec.encode(msg_uuid=msg_uuid.bytes, op_from=self.source_id, payload=data)
+        self.producer.send(message)
         msg_sent_time_ms = time.time() * 1000
 
         # If log_path is not None, we write timestamps to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            replay_log = {'msg_id': msg_id.serialize(),
+            replay_log = {'msg_uuid': str(msg_uuid),
                           'data_collection_time_ms': data_collection_time_ms,
                           'msg_sent_time_ms': msg_sent_time_ms}
             with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
@@ -51,7 +55,7 @@ class DataSource:
 
 
 class CodeSource(DataSource):
-    def __init__(self, stream, pulsar_node, gate=None, topic='src'):
+    def __init__(self, stream, pulsar_node, gate=lambda x: x.encode('utf-8'), topic='src'):
         super().__init__(stream, pulsar_node, 'code-source', gate, topic)
 
 

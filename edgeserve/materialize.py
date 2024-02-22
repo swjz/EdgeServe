@@ -1,9 +1,9 @@
 import pulsar
 from _pulsar import InitialPosition
-from pulsar.schema import AvroSchema
 
 from edgeserve.util import ftp_fetch, local_to_global_path
-from edgeserve.message_format import MessageFormat
+from edgeserve.message_format import GraphCodec
+
 
 class Materialize:
     def __init__(self, materialize, pulsar_node, gate=None, ftp=False, ftp_delete=False,
@@ -17,6 +17,7 @@ class Materialize:
         self.ftp = ftp
         self.local_ftp_path = local_ftp_path
         self.ftp_delete = ftp_delete
+        self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
 
     def __enter__(self):
         return self
@@ -29,8 +30,8 @@ class Materialize:
 
     def __next__(self):
         msg = self.consumer.receive()
-        # data = self.gate(msg.value().payload)
-        data = self.gate(msg.value())
+        msg_uuid, op_from, _, payload = self.graph_codec.decode(msg.value())
+        data = self.gate(payload)
 
         if self.ftp:
             # download the file from FTP server and then delete the file from server
