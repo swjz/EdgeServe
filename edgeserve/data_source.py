@@ -39,16 +39,16 @@ class DataSource:
         data_collection_time_ms = time.time() * 1000
 
         msg_uuid = uuid.uuid4()
-        message = self.graph_codec.encode(msg_uuid=msg_uuid.bytes, op_from=self.source_id, payload=data)
+        message = self.graph_codec.encode(msg_uuid=msg_uuid, op_from=self.source_id, payload=data)
         self.producer.send(message)
         msg_sent_time_ms = time.time() * 1000
 
         # If log_path is not None, we write timestamps to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            replay_log = {'msg_uuid': str(msg_uuid),
+            replay_log = {'msg_uuid': msg_uuid,
                           'data_collection_time_ms': data_collection_time_ms,
                           'msg_sent_time_ms': msg_sent_time_ms}
-            with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
+            with open(os.path.join(self.log_path, self.log_filename + '.datasource'), 'ab') as f:
                 pickle.dump(replay_log, f)
 
         return data

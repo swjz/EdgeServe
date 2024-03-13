@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 from typing import Callable, Optional, Tuple
 
 import pulsar
@@ -8,7 +9,7 @@ import pathlib
 from _pulsar import InitialPosition, ConsumerType
 
 from edgeserve.util import ftp_fetch, local_to_global_path
-from edgeserve.message_format import NetworkCodec
+from edgeserve.message_format import GraphCodec
 
 
 # This version intentionally drops schema support. Data sources cannot be combined adaptively.
@@ -32,6 +33,7 @@ class Model:
                  gate_out_destination: Optional[Callable] = None,
                  gate_in_signal: Optional[Callable] = None,
                  gate_out_signal: Optional[Callable] = None,
+                 model_id: Optional[str] = 'model1',
                  header_size: Optional[int] = None,
                  ftp: Optional[bool] = False,
                  ftp_memory: Optional[bool] = False,
@@ -57,6 +59,7 @@ class Model:
             gate_out_destination: The gating function applied to output prediction stream (to the destination topic).
             gate_in_signal: The gating function applied to input signal stream.
             gate_out_signal: The gating function applied to output signal stream.
+            model_id: The unique identifier of the model.
             ftp: When set to `True`, lazy routing mode is enabled.
             ftp_memory: When set to `True`, in-memory lazy routing mode is enabled. Only effective when `ftp=True`.
             ftp_delete: When set to `True`, delete remote data after fetching is complete. Only effective when `ftp=True`.
@@ -84,12 +87,13 @@ class Model:
         self.gate_out_destination = (lambda x: x) if gate_out_destination is None else gate_out_destination
         self.gate_in_signal = (lambda x: x) if gate_in_signal is None else gate_in_signal
         self.gate_out_signal = (lambda x: x) if gate_out_signal is None else gate_out_signal
+        self.model_id = model_id
         self.ftp = ftp  # consider changing this name to ftp_in
         self.local_ftp_path = local_ftp_path
         self.ftp_memory = ftp_memory  # consider changing this name to (negate) ftp_out
         self.ftp_delete = ftp_delete
         self.cached = dict()
-        self.latest_msg_id = dict()
+        self.latest_msg_uuid = dict()
         self.latest_msg_publish_time_ms = dict()
         self.latest_msg_consumed_time_ms = dict()
         self.max_time_diff_ms = max_time_diff_ms
@@ -103,7 +107,7 @@ class Model:
         self.receiver_queue_size = receiver_queue_size
 
         self.header_size = header_size if header_size else 32
-        self.network_codec = NetworkCodec(header_size=self.header_size)
+        self.graph_codec = GraphCodec(header_size=self.header_size)
         self.cached_data = dict()
         self.cached_signals = dict()
 
@@ -127,7 +131,7 @@ class Model:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.client.close()
 
-    def _try_task(self, flow_id) -> Tuple[bool, Optional[bool], Optional[bytes]]:
+    def _try_task(self, flow_id) -> Tuple[bool, Optional[bool], Optional[uuid.UUID], Optional[bytes]]:
         """Performs actual computation.
 
         Args:
@@ -137,16 +141,17 @@ class Model:
             is_performed: Whether the job is actually performed.
             is_satisfied: Whether the prediction is considered satisfied. If set to `True`, the result is sent to the
                           destination topic; if set to `False`, the result is sent to a more expensive model.
+            msg_out_uuid: The UUID of the output message. If set to `None`, no message is sent out.
             output: The prediction result in bytes.
         """
         # When `topic_in_signal` is not `None`, we only do actual computation when both data stream and signal stream
         # from the same `flow_id` are present.
         if self.topic_in_signal and (flow_id not in self.cached_data or flow_id not in self.cached_signals):
-            return False, None, None
+            return False, None, None, None
 
         # Avoid running too frequently for expensive tasks
         if time.time() * 1000 < self.last_run_start_ms + self.min_interval_ms:
-            return False, None, None
+            return False, None, None, None
 
         self.last_run_start_ms = time.time() * 1000
 
@@ -167,12 +172,13 @@ class Model:
         if self.ftp and not self.ftp_memory:
             output = self._write_ftp(output, local_file_path, last_run_finish_ms)
 
+        msg_out_uuid = uuid.uuid4()
         # If log_path is not None, we write aggregation decisions to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            self._log_aggregation_decisions(flow_id, last_run_finish_ms)
+            self._log_aggregation_decisions(flow_id, last_run_finish_ms, is_satisfied, msg_out_uuid, output)
 
         self._clear_cache(flow_id)
-        return True, is_satisfied, output
+        return True, is_satisfied, msg_out_uuid, output
 
     def _write_ftp(self, output, local_file_path, last_run_finish_ms):
         # For now, use the completion timestamp as the filename of output FTP file
@@ -188,32 +194,34 @@ class Model:
         if self.topic_in_signal:
             del self.cached_signals[flow_id]
 
-    def _log_incoming_msg(self, flow_id, msg):
+    def _log_incoming_msg(self, msg_in_uuid, flow_id, msg_in):
         self.latest_msg_consumed_time_ms[flow_id] = time.time() * 1000
-        msg_id = msg.message_id()
         if flow_id not in self.latest_msg_publish_time_ms:
-            self.latest_msg_publish_time_ms[flow_id] = [msg.publish_timestamp()]
-            self.latest_msg_id[flow_id] = [msg_id.serialize()]
+            self.latest_msg_publish_time_ms[flow_id] = [msg_in.publish_timestamp()]
+            self.latest_msg_uuid[flow_id] = [str(msg_in_uuid)]
         else:
-            self.latest_msg_publish_time_ms[flow_id].append(msg.publish_timestamp())
-            self.latest_msg_id[flow_id].append(msg_id.serialize())
+            self.latest_msg_publish_time_ms[flow_id].append(msg_in.publish_timestamp())
+            self.latest_msg_uuid[flow_id].append(str(msg_in_uuid))
 
-    def _log_aggregation_decisions(self, flow_id, last_run_finish_ms):
-        replay_log = {'msg_id': self.latest_msg_id,
-                      'msg_publish_time_ms': self.latest_msg_publish_time_ms,
-                      'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
+    def _log_aggregation_decisions(self, flow_id, last_run_finish_ms, is_satisfied, msg_out_uuid, msg_out_payload):
+        replay_log = {'msg_in_uuid': self.latest_msg_uuid,
+                      'msg_in_publish_time_ms': self.latest_msg_publish_time_ms,
+                      'msg_in_consumed_time_ms': self.latest_msg_consumed_time_ms,
                       'start_compute_time_ms': self.last_run_start_ms,
                       'finish_compute_time_ms': last_run_finish_ms,
                       'last_log_duration_ms': self.last_log_duration_ms,
-                      'data_payload': self.cached_data[flow_id],
-                      'signal_payload': self.cached_signals[flow_id] if self.topic_in_signal else None}
+                      'data_in_payload': self.cached_data[flow_id],
+                      'signal_in_payload': self.cached_signals[flow_id] if self.topic_in_signal else None,
+                      'msg_out_is_satisfied': is_satisfied,
+                      'msg_out_uuid': msg_out_uuid,
+                      'msg_out_payload': msg_out_payload}
         with open(os.path.join(self.log_path, self.log_filename + '.log'), 'ab') as f:
             pickle.dump(replay_log, f)
         self.last_log_duration_ms = time.time() * 1000 - last_run_finish_ms
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
-            self.latest_msg_id = dict()
+            self.latest_msg_uuid = dict()
             self.latest_msg_publish_time_ms = dict()
             self.latest_msg_consumed_time_ms = dict()
 
@@ -221,25 +229,24 @@ class Model:
         return self
 
     def __next__(self):
-        msg = self.consumer.receive()
-        value = msg.value()
-        flow_id, payload = self.network_codec.decode(value)
-        actual_topic_in = msg.topic_name().split('/')[-1]
+        msg_in = self.consumer.receive()
+        msg_in_uuid, op_from, flow_id, payload = self.graph_codec.decode(msg_in.value())
+        actual_topic_in = msg_in.topic_name().split('/')[-1]
 
-        if actual_topic_in == self.topic_in_signal or msg.topic_name() == self.topic_in_signal:
+        if actual_topic_in == self.topic_in_signal or msg_in.topic_name() == self.topic_in_signal:
             # We locally cache the prediction result ("signal") from another model.
             self.cached_signals[flow_id] = self.gate_in_signal(payload)
-        elif actual_topic_in == self.topic_in_data or msg.topic_name() == self.topic_in_data:
+        elif actual_topic_in == self.topic_in_data or msg_in.topic_name() == self.topic_in_data:
             self.cached_data[flow_id] = self.gate_in_data(payload)
         else:
             raise ValueError(
                 "The consumer's topic name does not match that of incoming message. The topic of incoming message is",
-                msg.topic_name())
+                msg_in.topic_name())
 
         if self.log_path and os.path.isdir(self.log_path):
-            self._log_incoming_msg(flow_id, msg)
+            self._log_incoming_msg(msg_in_uuid, flow_id, msg_in)
 
-        is_performed, is_satisfied, output = self._try_task(flow_id)
+        is_performed, is_satisfied, msg_out_uuid, output = self._try_task(flow_id)
         if is_performed:
             output = self.gate_out_destination(output)
         else:
@@ -250,13 +257,13 @@ class Model:
                 with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
                     pickle.dump(output, f)
             if is_satisfied:
-                self.producer_destination.send(self.network_codec.encode([flow_id, output]))
+                self.producer_destination.send(self.graph_codec.encode(msg_out_uuid, self.model_id, output, flow_id))
             elif self.topic_out_signal:
-                self.producer_signal.send(self.network_codec.encode([flow_id, output]))
+                self.producer_signal.send(self.graph_codec.encode(msg_out_uuid, self.model_id, output, flow_id))
             else:
                 raise ValueError("The result is not satisfactory but output signal topic is not present.")
 
         if self.acknowledge:
-            self.consumer.acknowledge(msg)
+            self.consumer.acknowledge(msg_in)
 
         return output if output else None
