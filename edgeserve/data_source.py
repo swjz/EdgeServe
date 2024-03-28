@@ -6,18 +6,23 @@ import pickle
 import uuid
 
 from edgeserve.message_format import GraphCodec
+from edgeserve.util import local_to_global_path
 
 
 class DataSource:
-    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', log_path=None, log_filename=None):
+    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', ftp_out=False, local_ftp_path='/srv/ftp/',
+                 log_path=None, log_filename=None, log_payload=True):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic, schema=pulsar.schema.BytesSchema())
         self.stream = iter(stream)
         self.gate = (lambda x: x) if gate is None else gate
         assert len(source_id) <= 16, 'source_id must be at most 16 bytes long'
         self.source_id = source_id
+        self.ftp_out = ftp_out
+        self.local_ftp_path = local_ftp_path
         self.log_path = log_path
-        self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
+        self.log_filename = source_id if log_filename is None else log_filename
+        self.log_payload = log_payload
         self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
 
     def __enter__(self):
@@ -39,17 +44,32 @@ class DataSource:
         data_collection_time_ms = time.time() * 1000
 
         msg_uuid = uuid.uuid4()
+        if self.ftp_out or (self.log_path and os.path.isdir(self.log_path) and not self.log_payload):
+            local_file_path = os.path.join(self.local_ftp_path, str(msg_uuid) + '.ftp')
+            with open(local_file_path, 'wb') as f:
+                pickle.dump(data, f)
+            global_file_path = local_to_global_path(local_file_path, self.local_ftp_path)
+            # Do not modify the data variable when lazy data routing is disabled.
+            if self.ftp_out:
+                data = global_file_path
+
         message = self.graph_codec.encode(msg_uuid=msg_uuid, op_from=self.source_id, payload=data)
         self.producer.send(message)
         msg_sent_time_ms = time.time() * 1000
 
         # If log_path is not None, we write timestamps to a log file.
         if self.log_path and os.path.isdir(self.log_path):
-            replay_log = {'msg_uuid': msg_uuid,
-                          'data_collection_time_ms': data_collection_time_ms,
-                          'msg_sent_time_ms': msg_sent_time_ms}
-            with open(os.path.join(self.log_path, self.log_filename + '.datasource'), 'ab') as f:
-                pickle.dump(replay_log, f)
+            log_file = os.path.join(self.log_path, self.log_filename + '.datasource')
+            if not os.path.exists(log_file):
+                with open(log_file, 'w') as f:
+                    f.write('msg_uuid,payload,data_collection_time_ms,msg_sent_time_ms\n')
+            with open(log_file, 'a') as f:
+                if self.log_payload:
+                    f.write(str(msg_uuid) + ',' + str(data) + ',' + str(data_collection_time_ms) + ',' +
+                            str(msg_sent_time_ms) + '\n')
+                else:
+                    f.write(str(msg_uuid) + ',' + global_file_path + ',' + str(data_collection_time_ms) + ',' +
+                            str(msg_sent_time_ms) + '\n')
 
         return data
 

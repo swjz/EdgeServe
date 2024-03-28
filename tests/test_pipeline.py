@@ -68,10 +68,10 @@ def test_ftp_file(ftp_data):
 
     with DataSource(ftp_data['stream'], ftp_data['node'], source_id='file_path', topic='file_path',
                     gate=lambda x: x.encode('utf-8')) as data_source, \
-            Compute(ftp_data['task']['file'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/', ftp_memory=False,
+            Compute(ftp_data['task']['file'], ftp_data['node'], ftp_in=True, local_ftp_path='/srv/ftp/', ftp_memory=False,
                     ftp_delete=True, topic_in='file_path', gate_in=lambda x: x.decode('utf-8'),
                     gate_out=lambda x: x.encode('utf-8')) as compute, \
-            Materialize(lambda x: x, ftp_data['node'], ftp=True, gate=lambda x: x.decode('utf-8')) as materialize:
+            Materialize(lambda x: x, ftp_data['node'], ftp_in=True, gate=lambda x: x.decode('utf-8')) as materialize:
         for path in ftp_data['stream']:
             assert next(data_source) == path.encode('utf-8')
             assert urlopen(next(compute).decode('utf-8')).read() == b'Hello World!'
@@ -85,7 +85,7 @@ def test_ftp_memory(ftp_data):
 
     with DataSource(ftp_data['stream'], ftp_data['node'], source_id='data', topic='data',
                     gate=lambda x: x.encode('utf-8')) as data_source, \
-            Compute(ftp_data['task']['memory'], ftp_data['node'], ftp=True, local_ftp_path='/srv/ftp/',
+            Compute(ftp_data['task']['memory'], ftp_data['node'], ftp_in=True, local_ftp_path='/srv/ftp/',
                     ftp_memory=True, ftp_delete=True, topic_in='data', gate_in=lambda x: x.decode('utf-8'),
                     gate_out=lambda x: x.encode('utf-8')) as compute:
         for path in ftp_data['stream']:

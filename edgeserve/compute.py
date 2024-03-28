@@ -13,7 +13,7 @@ from edgeserve.message_format import GraphCodec
 
 
 class Compute:
-    def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp=False, ftp_memory=False,
+    def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp_in=False, ftp_out=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
                  max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None,
                  drop_if_older_than_ms=None, log_verbose=False):
@@ -25,8 +25,8 @@ class Compute:
             worker_id: The unique identifier of this operator.
             gate_in: The gating function applied to input stream.
             gate_out: The gating function applied to output stream.
-            ftp: When set to `True`, lazy routing mode is enabled.
-            ftp_memory: When set to `True`, in-memory lazy routing mode is enabled. Only effective when `ftp=True`.
+            ftp_in: When set to `True`, lazy routing mode is enabled for the input stream.
+            ftp_out: When set to `True`, lazy routing mode is enabled for the output stream.
             ftp_delete: When set to `True`, delete remote data after fetching is complete. Only effective when `ftp=True`.
             local_ftp_path: The local FTP path served by an active FTP server. Other nodes fetch data from this path.
             topic_in: Pulsar topic of the input data stream.
@@ -49,10 +49,10 @@ class Compute:
         self.worker_id = worker_id
         self.gate_in = (lambda x: x) if gate_in is None else gate_in
         self.gate_out = (lambda x: x) if gate_out is None else gate_out
-        self.ftp = ftp  # consider changing this name to ftp_in
-        self.local_ftp_path = local_ftp_path
-        self.ftp_memory = ftp_memory  # consider changing this name to (negate) ftp_out
+        self.ftp_in = ftp_in  # consider changing this name to ftp_in
+        self.ftp_out = ftp_out
         self.ftp_delete = ftp_delete
+        self.local_ftp_path = local_ftp_path
         self.latest_msg = dict()
         self.latest_msg_in_uuid = dict()
         self.latest_msg_publish_time_ms = dict()
@@ -63,7 +63,7 @@ class Compute:
         self.last_run_start_ms = 0
         self.last_run_finish_ms = 0
         self.log_path = log_path
-        self.log_filename = str(time.time() * 1000) if log_filename is None else log_filename
+        self.log_filename = worker_id if log_filename is None else log_filename
         self.drop_if_older_than_ms = drop_if_older_than_ms
         self.log_verbose = log_verbose
         self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
@@ -94,23 +94,25 @@ class Compute:
         self.last_run_start_ms = time.time() * 1000
 
         # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
-        if self.ftp:
+        if self.ftp_in:
             for source_id in self.latest_msg.keys():
                 if 'ftp://' in self.latest_msg[source_id]:
-                    local_file_path = ftp_fetch(self.latest_msg[source_id], self.local_ftp_path, memory=self.ftp_memory, delete=self.ftp_delete)
-                    self.latest_msg[source_id] = local_file_path
+                    local_file_path = ftp_fetch(self.latest_msg[source_id], self.local_ftp_path, memory=not self.ftp_out, delete=self.ftp_delete)
+                    with open(local_file_path, 'rb') as f:
+                        self.latest_msg[source_id] = pickle.load(f)
 
         output = self.task(**self.latest_msg)
         self.last_run_finish_ms = time.time() * 1000
         msg_out_uuid = uuid.uuid4()
 
-        # For now, use the completion timestamp as the filename of output FTP file
-        if self.ftp and not self.ftp_memory and output:
-            ftp_output_dir = os.path.join(os.path.dirname(local_file_path), 'ftp_output')
+        # Write output to disk for lazy data routing and logging purposes.
+        if output and (self.ftp_out or self.log_path):
+            ftp_output_dir = os.path.join(self.local_ftp_path, 'ftp_output')
             pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
-            with open(os.path.join(ftp_output_dir, str(self.last_run_finish_ms)) + '.ftp', 'w') as f:
-                f.write(output)
-            output = os.path.join(ftp_output_dir, str(self.last_run_finish_ms)) + '.ftp'
+            with open(os.path.join(ftp_output_dir, str(msg_out_uuid) + '.ftp'), 'wb') as f:
+                pickle.dump(output, f)
+            self.output_path = os.path.join(ftp_output_dir, str(msg_out_uuid) + '.ftp')
+            output = self.output_path if self.ftp_out else output
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
@@ -143,50 +145,45 @@ class Compute:
             self.latest_msg[op_from] = data
             self.latest_msg_in_uuid[op_from] = msg_in_uuid
 
-        if self.ftp and not self.ftp_memory:  # FTP file mode
+        if self.ftp_in:
             # download the file from FTP server and then delete the file from server
             if not data.startswith('ftp://'):
                 return None
-            self.latest_msg[op_from] = data
-            ret, msg_out_uuid, output = self._try_task()
-            if ret and output:
-                global_file_path = local_to_global_path(output, self.local_ftp_path)
-                output = self.gate_out(global_file_path)
-        else:
-            if self.ftp:  # FTP memory mode
-                self.latest_msg[op_from] = data
-            # memory mode
-            ret, msg_out_uuid, output = self._try_task()
-            if ret and output:
-                output = self.gate_out(output)
+        ret, msg_out_uuid, output = self._try_task()
 
-        # If log_path is not None, we write aggregation decisions to a log file.
-        if self.log_path and os.path.isdir(self.log_path):
-            if ret or self.log_verbose:
-                replay_log = {'msg_in_uuid': self.latest_msg_in_uuid,
-                              'msg_in_payload': self.latest_msg,
-                              'msg_out_uuid': msg_out_uuid,
-                              'msg_out_payload': output,
-                              'msg_publish_time_ms': self.latest_msg_publish_time_ms,
-                              'msg_consumed_time_ms': self.latest_msg_consumed_time_ms,
-                              'start_compute_time_ms': self.last_run_start_ms,
-                              'finish_compute_time_ms': self.last_run_finish_ms,
-                              'worker_id': self.worker_id,
-                              'is_join_performed': ret}
-                with open(os.path.join(self.log_path, self.log_filename + '.compute'), 'ab') as f:
-                    pickle.dump(replay_log, f)
+        if ret and output:
+            if self.ftp_out:
+                output = local_to_global_path(output, self.local_ftp_path)
+            output = self.gate_out(output)
 
         if output:
-            if self.log_path and os.path.isdir(self.log_path):
-                with open(os.path.join(self.log_path, self.log_filename + '.output'), 'ab') as f:
-                    pickle.dump(output, f)
             if type(output) == str:
                 output = output.encode('utf-8')
             msg_out = self.graph_codec.encode(msg_uuid=msg_out_uuid, op_from=self.worker_id, payload=output)
             self.producer.send(msg_out)
-            self.consumer.acknowledge(msg_in)
-            return output
-        else:
-            # No output is given, no need to materialize
-            self.consumer.acknowledge(msg_in)
-            return None
+
+        if self.log_path and (ret or self.log_verbose):
+            pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
+            log_file = os.path.join(self.log_path, self.log_filename + '.compute')
+            if not os.path.exists(log_file):
+                with open(log_file, 'w') as f:
+                    for k in sorted(signature(self.task).parameters.keys()):
+                        f.write(k + ',')
+                    f.write('msg_out_uuid,msg_out_payload,start_compute_time_ms,finish_compute_time_ms,worker_id,'
+                            'is_join_performed\n')
+
+            with open(log_file, 'a') as f:
+                for k in sorted(signature(self.task).parameters.keys()):
+                    if k in self.latest_msg_in_uuid:
+                        f.write(str(self.latest_msg_in_uuid[k]) + ',')
+                    else:
+                        f.write('None,')
+                if output:
+                    f.write(str(msg_out_uuid) + ',' + str(self.output_path) + ',' + str(self.last_run_start_ms) + ',' +
+                            str(self.last_run_finish_ms) + ',' + str(self.worker_id) + ',' + str(ret) + '\n')
+                else:
+                    f.write(str(msg_out_uuid) + ',None,' + str(self.last_run_start_ms) + ',' +
+                            str(self.last_run_finish_ms) + ',' + str(self.worker_id) + ',' + str(ret) + '\n')
+
+        self.consumer.acknowledge(msg_in)
+        return output if output else None
