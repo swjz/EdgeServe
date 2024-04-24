@@ -10,13 +10,14 @@ from inspect import signature
 
 from edgeserve.util import ftp_fetch, local_to_global_path
 from edgeserve.message_format import GraphCodec
+from edgeserve.logging import Loggable
 
 
-class Compute:
+class Compute(Loggable):
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp_in=False, ftp_out=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
                  max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None,
-                 drop_if_older_than_ms=None, log_verbose=False):
+                 drop_if_older_than_ms=None, is_log_verbose=False, is_overhead_logged=False):
         """Initializes a compute operator.
 
         Args:
@@ -37,7 +38,8 @@ class Compute:
             log_path: Path to store the replay log. When set to `None`, log is disabled.
             log_filename: File name of replay log. When set to `None`, the current timestamp is used as file name.
             drop_if_older_than_ms: When set to a value, messages older than this value relative to current time are dropped.
-            log_verbose: When set to `False`, we only log in the replay log when a join operation is performed.
+            is_log_verbose: When set to `False`, we only log in the replay log when a join operation is performed.
+            is_overhead_logged: When set to `True`, we log the overhead of logging itself.
         """
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=pulsar.schema.BytesSchema())
@@ -65,7 +67,8 @@ class Compute:
         self.log_path = log_path
         self.log_filename = worker_id if log_filename is None else log_filename
         self.drop_if_older_than_ms = drop_if_older_than_ms
-        self.log_verbose = log_verbose
+        self.is_log_verbose = is_log_verbose
+        self.is_overhead_logged = is_overhead_logged
         self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
 
     def __enter__(self):
@@ -84,22 +87,24 @@ class Compute:
 
         earliest = None
         latest = None
-        for source_id in self.latest_msg.keys():
-            if earliest is None or self.latest_msg_publish_time_ms[source_id] < earliest:
-                earliest = self.latest_msg_publish_time_ms[source_id]
-            if latest is None or self.latest_msg_publish_time_ms[source_id] > latest:
-                latest = self.latest_msg_publish_time_ms[source_id]
+        for op_from in self.latest_msg.keys():
+            if earliest is None or self.latest_msg_publish_time_ms[op_from] < earliest:
+                earliest = self.latest_msg_publish_time_ms[op_from]
+            if latest is None or self.latest_msg_publish_time_ms[op_from] > latest:
+                latest = self.latest_msg_publish_time_ms[op_from]
             if latest - earliest > self.max_time_diff_ms:
                 return False, None, None
         self.last_run_start_ms = time.time() * 1000
 
         # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
         if self.ftp_in:
-            for source_id in self.latest_msg.keys():
-                if 'ftp://' in self.latest_msg[source_id]:
-                    local_file_path = ftp_fetch(self.latest_msg[source_id], self.local_ftp_path, memory=not self.ftp_out, delete=self.ftp_delete)
+            for op_from in self.latest_msg.keys():
+                if 'ftp://' in self.latest_msg[op_from]:
+                    local_file_path = ftp_fetch(self.latest_msg[op_from], self.local_ftp_path, memory=not self.ftp_out, delete=self.ftp_delete)
                     with open(local_file_path, 'rb') as f:
-                        self.latest_msg[source_id] = pickle.load(f)
+                        self.latest_msg[op_from] = pickle.load(f)
+                    # P2P data fetching log.
+                    self.p2p_log(self.latest_msg_in_uuid[op_from], op_from, local_file_path)
 
         output = self.task(**self.latest_msg)
         self.last_run_finish_ms = time.time() * 1000
@@ -123,20 +128,48 @@ class Compute:
 
         return True, msg_out_uuid, output
 
+    def write_ahead_log(self, msg_out_uuid, is_join_performed):
+        if self.log_path and (is_join_performed or self.is_log_verbose):
+            pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
+            log_start_time_ms = time.time() * 1000
+            log_file = os.path.join(self.log_path, self.log_filename + '.wal')
+            if not os.path.exists(log_file):
+                with open(log_file, 'w') as f:
+                    for k in sorted(signature(self.task).parameters.keys()):
+                        f.write(k + ',')
+                    f.write('msg_out_uuid,msg_out_payload,start_compute_time_ms,finish_compute_time_ms,'
+                            'is_join_performed\n')
+
+            with open(log_file, 'a') as f:
+                for k in sorted(signature(self.task).parameters.keys()):
+                    if k in self.latest_msg_in_uuid:
+                        f.write(str(self.latest_msg_in_uuid[k]) + ',')
+                    else:
+                        f.write('None,')
+                f.write(str(msg_out_uuid) + ',' + str(self.output_path) + ',' + str(self.last_run_start_ms) + ',' +
+                        str(self.last_run_finish_ms) + ',' + str(is_join_performed) + '\n')
+
+            if self.is_overhead_logged:
+                self.overhead_log(msg_out_uuid, log_file, log_start_time_ms)
+
     def __iter__(self):
         return self
 
     def __next__(self):
         msg_in = self.consumer.receive()
+        received_time_ms = time.time() * 1000
 
         if self.drop_if_older_than_ms is not None:
             assert isinstance(self.drop_if_older_than_ms, int)
-            if msg_in.publish_timestamp() + self.drop_if_older_than_ms < time.time() * 1000:
+            if msg_in.publish_timestamp() + self.drop_if_older_than_ms < received_time_ms:
                 # incoming message is too old, skip it.
                 self.consumer.acknowledge(msg_in)
                 return None
 
         msg_in_uuid, op_from, _, payload = self.graph_codec.decode(msg_in.value())
+
+        # On receive log. Note that payload is not logged here.
+        self.on_receive_log(msg_in_uuid, op_from, received_time_ms)
 
         data = self.gate_in(payload)  # path to file if ftp, raw data in bytes otherwise
         if data is not None:
@@ -149,6 +182,8 @@ class Compute:
             # download the file from FTP server and then delete the file from server
             if not data.startswith('ftp://'):
                 return None
+
+        self.output_path = None
         ret, msg_out_uuid, output = self._try_task()
 
         if ret and output:
@@ -156,34 +191,14 @@ class Compute:
                 output = local_to_global_path(output, self.local_ftp_path)
             output = self.gate_out(output)
 
+        # Write ahead log. If log_path is set, log the message in a CSV file.
+        self.write_ahead_log(msg_out_uuid, ret)
+
         if output:
             if type(output) == str:
                 output = output.encode('utf-8')
             msg_out = self.graph_codec.encode(msg_uuid=msg_out_uuid, op_from=self.worker_id, payload=output)
             self.producer.send(msg_out)
-
-        if self.log_path and (ret or self.log_verbose):
-            pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
-            log_file = os.path.join(self.log_path, self.log_filename + '.compute')
-            if not os.path.exists(log_file):
-                with open(log_file, 'w') as f:
-                    for k in sorted(signature(self.task).parameters.keys()):
-                        f.write(k + ',')
-                    f.write('msg_out_uuid,msg_out_payload,start_compute_time_ms,finish_compute_time_ms,worker_id,'
-                            'is_join_performed\n')
-
-            with open(log_file, 'a') as f:
-                for k in sorted(signature(self.task).parameters.keys()):
-                    if k in self.latest_msg_in_uuid:
-                        f.write(str(self.latest_msg_in_uuid[k]) + ',')
-                    else:
-                        f.write('None,')
-                if output:
-                    f.write(str(msg_out_uuid) + ',' + str(self.output_path) + ',' + str(self.last_run_start_ms) + ',' +
-                            str(self.last_run_finish_ms) + ',' + str(self.worker_id) + ',' + str(ret) + '\n')
-                else:
-                    f.write(str(msg_out_uuid) + ',None,' + str(self.last_run_start_ms) + ',' +
-                            str(self.last_run_finish_ms) + ',' + str(self.worker_id) + ',' + str(ret) + '\n')
 
         self.consumer.acknowledge(msg_in)
         return output if output else None

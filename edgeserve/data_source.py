@@ -4,14 +4,16 @@ import time
 import os
 import pickle
 import uuid
+import pathlib
 
 from edgeserve.message_format import GraphCodec
 from edgeserve.util import local_to_global_path
+from edgeserve.logging import Loggable
 
 
-class DataSource:
+class DataSource(Loggable):
     def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', ftp_out=False, local_ftp_path='/srv/ftp/',
-                 log_path=None, log_filename=None, log_payload=True):
+                 log_path=None, log_filename=None, is_payload_logged=True, is_overhead_logged=False):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic, schema=pulsar.schema.BytesSchema())
         self.stream = iter(stream)
@@ -22,7 +24,8 @@ class DataSource:
         self.local_ftp_path = local_ftp_path
         self.log_path = log_path
         self.log_filename = source_id if log_filename is None else log_filename
-        self.log_payload = log_payload
+        self.is_payload_logged = is_payload_logged
+        self.is_overhead_logged = is_overhead_logged
         self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
 
     def __enter__(self):
@@ -30,6 +33,19 @@ class DataSource:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.client.close()
+
+    def write_ahead_log(self, msg_uuid, logged_data, data_collection_time_ms):
+        if self.log_path:
+            pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
+            log_start_time_ms = time.time() * 1000
+            log_file = os.path.join(self.log_path, self.log_filename + '.wal')
+            if not os.path.exists(log_file):
+                with open(log_file, 'w') as f:
+                    f.write('msg_uuid,payload,data_collection_time_ms\n')
+            with open(log_file, 'a') as f:
+                f.write(f'{msg_uuid},{logged_data},{data_collection_time_ms}\n')
+            if self.is_overhead_logged:
+                self.overhead_log(msg_uuid, log_file, log_start_time_ms)
 
     def __iter__(self):
         return self
@@ -44,7 +60,7 @@ class DataSource:
         data_collection_time_ms = time.time() * 1000
 
         msg_uuid = uuid.uuid4()
-        if self.ftp_out or (self.log_path and os.path.isdir(self.log_path) and not self.log_payload):
+        if self.ftp_out or (self.log_path and not self.is_payload_logged):
             local_file_path = os.path.join(self.local_ftp_path, str(msg_uuid) + '.ftp')
             with open(local_file_path, 'wb') as f:
                 pickle.dump(data, f)
@@ -54,23 +70,14 @@ class DataSource:
                 data = global_file_path
 
         message = self.graph_codec.encode(msg_uuid=msg_uuid, op_from=self.source_id, payload=data)
+
+        # Write ahead log.
+        if self.is_payload_logged:
+            self.write_ahead_log(msg_uuid, data, data_collection_time_ms)
+        else:
+            self.write_ahead_log(msg_uuid, global_file_path, data_collection_time_ms)
+
         self.producer.send(message)
-        msg_sent_time_ms = time.time() * 1000
-
-        # If log_path is not None, we write timestamps to a log file.
-        if self.log_path and os.path.isdir(self.log_path):
-            log_file = os.path.join(self.log_path, self.log_filename + '.datasource')
-            if not os.path.exists(log_file):
-                with open(log_file, 'w') as f:
-                    f.write('msg_uuid,payload,data_collection_time_ms,msg_sent_time_ms\n')
-            with open(log_file, 'a') as f:
-                if self.log_payload:
-                    f.write(str(msg_uuid) + ',' + str(data) + ',' + str(data_collection_time_ms) + ',' +
-                            str(msg_sent_time_ms) + '\n')
-                else:
-                    f.write(str(msg_uuid) + ',' + global_file_path + ',' + str(data_collection_time_ms) + ',' +
-                            str(msg_sent_time_ms) + '\n')
-
         return data
 
 
