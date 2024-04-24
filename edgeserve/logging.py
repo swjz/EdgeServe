@@ -21,16 +21,16 @@ class Loggable:
                 f.write(f'{msg_uuid},{log_end_time_ms - log_start_time_ms}\n')
 
     # On receive log. Note that payload is not logged here.
-    def on_receive_log(self, msg_in_uuid, op_from, received_time_ms):
+    def on_receive_log(self, msg_in_uuid, op_from, received_time_ms, msg_out_uuid):
         if self.log_path:
             pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
             log_start_time_ms = time.time() * 1000
             log_file = os.path.join(self.log_path, self.log_filename + '.orl')
             if not os.path.exists(log_file):
                 with open(log_file, 'w') as f:
-                    f.write('msg_in_uuid,op_from,received_time_ms\n')
+                    f.write('msg_in_uuid,op_from,received_time_ms,msg_out_uuid\n')
             with open(log_file, 'a') as f:
-                f.write(f'{msg_in_uuid},{op_from},{received_time_ms}\n')
+                f.write(f'{msg_in_uuid},{op_from},{received_time_ms},{msg_out_uuid}\n')
 
             if self.is_overhead_logged:
                 self.overhead_log(msg_in_uuid, log_file, log_start_time_ms)

@@ -80,10 +80,10 @@ class Compute(Loggable):
     def _try_task(self):
         # Avoid running too frequently for expensive tasks
         if time.time() * 1000 < self.last_run_start_ms + self.min_interval_ms:
-            return False, None, None
+            return False, None
 
         if len(self.latest_msg) < len(signature(self.task).parameters):
-            return False, None, None
+            return False, None
 
         earliest = None
         latest = None
@@ -93,14 +93,15 @@ class Compute(Loggable):
             if latest is None or self.latest_msg_publish_time_ms[op_from] > latest:
                 latest = self.latest_msg_publish_time_ms[op_from]
             if latest - earliest > self.max_time_diff_ms:
-                return False, None, None
+                return False, None
         self.last_run_start_ms = time.time() * 1000
 
         # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
         if self.ftp_in:
             for op_from in self.latest_msg.keys():
                 if 'ftp://' in self.latest_msg[op_from]:
-                    local_file_path = ftp_fetch(self.latest_msg[op_from], self.local_ftp_path, memory=not self.ftp_out, delete=self.ftp_delete)
+                    local_file_path = ftp_fetch(self.latest_msg[op_from], self.local_ftp_path, memory=not self.ftp_out,
+                                                delete=self.ftp_delete)
                     with open(local_file_path, 'rb') as f:
                         self.latest_msg[op_from] = pickle.load(f)
                     # P2P data fetching log.
@@ -108,15 +109,14 @@ class Compute(Loggable):
 
         output = self.task(**self.latest_msg)
         self.last_run_finish_ms = time.time() * 1000
-        msg_out_uuid = uuid.uuid4()
 
         # Write output to disk for lazy data routing and logging purposes.
         if output and (self.ftp_out or self.log_path):
             ftp_output_dir = os.path.join(self.local_ftp_path, 'ftp_output')
             pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
-            with open(os.path.join(ftp_output_dir, str(msg_out_uuid) + '.ftp'), 'wb') as f:
+            with open(os.path.join(ftp_output_dir, str(self.msg_out_uuid) + '.ftp'), 'wb') as f:
                 pickle.dump(output, f)
-            self.output_path = os.path.join(ftp_output_dir, str(msg_out_uuid) + '.ftp')
+            self.output_path = os.path.join(ftp_output_dir, str(self.msg_out_uuid) + '.ftp')
             output = self.output_path if self.ftp_out else output
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
@@ -126,9 +126,9 @@ class Compute(Loggable):
             self.latest_msg_publish_time_ms = dict()
             self.latest_msg_consumed_time_ms = dict()
 
-        return True, msg_out_uuid, output
+        return True, output
 
-    def write_ahead_log(self, msg_out_uuid, is_join_performed):
+    def write_ahead_log(self, is_join_performed):
         if self.log_path and (is_join_performed or self.is_log_verbose):
             pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
             log_start_time_ms = time.time() * 1000
@@ -146,11 +146,11 @@ class Compute(Loggable):
                         f.write(str(self.latest_msg_in_uuid[k]) + ',')
                     else:
                         f.write('None,')
-                f.write(str(msg_out_uuid) + ',' + str(self.output_path) + ',' + str(self.last_run_start_ms) + ',' +
+                f.write(str(self.msg_out_uuid) + ',' + str(self.output_path) + ',' + str(self.last_run_start_ms) + ',' +
                         str(self.last_run_finish_ms) + ',' + str(is_join_performed) + '\n')
 
             if self.is_overhead_logged:
-                self.overhead_log(msg_out_uuid, log_file, log_start_time_ms)
+                self.overhead_log(self.msg_out_uuid, log_file, log_start_time_ms)
 
     def __iter__(self):
         return self
@@ -167,9 +167,10 @@ class Compute(Loggable):
                 return None
 
         msg_in_uuid, op_from, _, payload = self.graph_codec.decode(msg_in.value())
+        self.msg_out_uuid = uuid.uuid4()  # pre-generate the UUID for the output message
 
         # On receive log. Note that payload is not logged here.
-        self.on_receive_log(msg_in_uuid, op_from, received_time_ms)
+        self.on_receive_log(msg_in_uuid, op_from, received_time_ms, self.msg_out_uuid)
 
         data = self.gate_in(payload)  # path to file if ftp, raw data in bytes otherwise
         if data is not None:
@@ -184,7 +185,7 @@ class Compute(Loggable):
                 return None
 
         self.output_path = None
-        ret, msg_out_uuid, output = self._try_task()
+        ret, output = self._try_task()
 
         if ret and output:
             if self.ftp_out:
@@ -192,12 +193,12 @@ class Compute(Loggable):
             output = self.gate_out(output)
 
         # Write ahead log. If log_path is set, log the message in a CSV file.
-        self.write_ahead_log(msg_out_uuid, ret)
+        self.write_ahead_log(ret)
 
         if output:
             if type(output) == str:
                 output = output.encode('utf-8')
-            msg_out = self.graph_codec.encode(msg_uuid=msg_out_uuid, op_from=self.worker_id, payload=output)
+            msg_out = self.graph_codec.encode(msg_uuid=self.msg_out_uuid, op_from=self.worker_id, payload=output)
             self.producer.send(msg_out)
 
         self.consumer.acknowledge(msg_in)

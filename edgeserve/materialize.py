@@ -46,7 +46,7 @@ class Materialize(Loggable):
         output = data
 
         # On receive log. Note that payload is not logged here.
-        self.on_receive_log(msg_in_uuid, op_from, received_time_ms)
+        self.on_receive_log(msg_in_uuid, op_from, received_time_ms, None)
 
         if self.ftp_in:
             # download the file from FTP server and then delete the file from server (if set)
