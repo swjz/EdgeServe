@@ -5,6 +5,7 @@ import sys
 import time
 from urllib.error import URLError
 from urllib.parse import unquote, urlparse
+from functools import lru_cache
 
 
 def local_to_global_path(local_file_path, local_ftp_path):
@@ -34,6 +35,20 @@ def ftp_fetch(url, local_ftp_path='/srv/ftp/', memory=True, delete=False):
     handler.ftp_open(host, dir, file, memory, delete)
     return local_ftp_path + dir + '/' + file
 
+
+@lru_cache
+def load_audio(fname):
+    import librosa
+    import numpy as np
+    a, _ = librosa.load(fname, sr=16000, dtype=np.float32)
+    return a
+
+
+def load_audio_chunk(fname, beg, end):
+    audio = load_audio(fname)
+    beg_s = int(beg*16000)
+    end_s = int(end*16000)
+    return audio[beg_s:end_s]
 
 def splituser(host):
     """splituser('user[:passwd]@host[:port]') --> 'user[:passwd]', 'host[:port]'."""

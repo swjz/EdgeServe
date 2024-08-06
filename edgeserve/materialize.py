@@ -7,7 +7,7 @@ from _pulsar import InitialPosition
 
 from edgeserve.util import ftp_fetch, local_to_global_path
 from edgeserve.message_format import GraphCodec
-from edgeserve.logging import Loggable
+from edgeserve.loggable import Loggable
 
 
 class Materialize(Loggable):
@@ -46,7 +46,7 @@ class Materialize(Loggable):
         output = data
 
         # On receive log. Note that payload is not logged here.
-        self.on_receive_log(msg_in_uuid, op_from, received_time_ms, None)
+        self.on_receive_log_to_file(msg_in_uuid, op_from, received_time_ms, None)
 
         if self.ftp_in:
             # download the file from FTP server and then delete the file from server (if set)

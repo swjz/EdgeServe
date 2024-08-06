@@ -10,14 +10,15 @@ from inspect import signature
 
 from edgeserve.util import ftp_fetch, local_to_global_path
 from edgeserve.message_format import GraphCodec
-from edgeserve.logging import Loggable
+from edgeserve.loggable import Loggable
 
 
 class Compute(Loggable):
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp_in=False, ftp_out=False,
                  ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
-                 max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0, log_path=None, log_filename=None,
-                 drop_if_older_than_ms=None, is_log_verbose=False, is_overhead_logged=False):
+                 topic_prune_prefix='prune', max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0,
+                 log_path=None, log_filename=None, drop_if_older_than_ms=None, is_log_verbose=False,
+                 is_overhead_logged=False, enable_prune=False, single_input=False):
         """Initializes a compute operator.
 
         Args:
@@ -32,14 +33,17 @@ class Compute(Loggable):
             local_ftp_path: The local FTP path served by an active FTP server. Other nodes fetch data from this path.
             topic_in: Pulsar topic of the input data stream.
             topic_out: Pulsar topic of the output data stream.
+            topic_prune_prefix: Pulsar topic prefix of the log-pruning data stream.
             max_time_diff_ms: The maximum timestamp difference we tolerate between data sources to aggregate together.
             no_overlap: When set to `True`, we ensure that every message is at most processed once.
             min_interval_ms: The minimum time interval between two consecutive runs.
             log_path: Path to store the replay log. When set to `None`, log is disabled.
-            log_filename: File name of replay log. When set to `None`, the current timestamp is used as file name.
+            log_filename: File name of replay log. When set to `None`, the worker_id is used as file name.
             drop_if_older_than_ms: When set to a value, messages older than this value relative to current time are dropped.
             is_log_verbose: When set to `False`, we only log in the replay log when a join operation is performed.
             is_overhead_logged: When set to `True`, we log the overhead of logging itself.
+            enable_prune: When set to `True`, we enable the log-pruning feature.
+            single_input: When set to `True`, we only accept one input message for each run.
         """
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic_out, schema=pulsar.schema.BytesSchema())
@@ -47,6 +51,8 @@ class Compute(Loggable):
                                               consumer_type=ConsumerType.Shared,
                                               schema=pulsar.schema.BytesSchema(),
                                               initial_position=InitialPosition.Earliest)
+        self.prune_producers = dict()
+        self.topic_prune_prefix = topic_prune_prefix
         self.task = task
         self.worker_id = worker_id
         self.gate_in = (lambda x: x) if gate_in is None else gate_in
@@ -70,6 +76,9 @@ class Compute(Loggable):
         self.is_log_verbose = is_log_verbose
         self.is_overhead_logged = is_overhead_logged
         self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
+        self.latest_msg_used = dict()
+        self.enable_prune = enable_prune
+        self.single_input = single_input
 
     def __enter__(self):
         return self
@@ -77,10 +86,37 @@ class Compute(Loggable):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.client.close()
 
+    def _write_output_to_disk(self, output):
+        # Write output to disk for lazy data routing and logging purposes.
+        ftp_output_dir = os.path.join(self.local_ftp_path, 'ftp_output')
+        pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
+        with open(os.path.join(ftp_output_dir, str(self.msg_out_uuid) + '.ftp'), 'wb') as f:
+            pickle.dump(output, f)
+        self.output_path = os.path.join(ftp_output_dir, str(self.msg_out_uuid) + '.ftp')
+        output = self.output_path if self.ftp_out else output
+        return output
+
     def _try_task(self):
         # Avoid running too frequently for expensive tasks
         if time.time() * 1000 < self.last_run_start_ms + self.min_interval_ms:
             return False, None
+
+        if self.single_input:
+            # find the op_from with the latest message
+            op_from = max(self.latest_msg_publish_time_ms, key=self.latest_msg_publish_time_ms.get)
+            kwargs = {op_from: self.latest_msg[op_from]}
+            param_names = self.task.__code__.co_varnames[:self.task.__code__.co_argcount]
+            for param in param_names:
+                if param not in kwargs:
+                    kwargs[param] = None
+            self.last_run_start_ms = time.time() * 1000
+            # TODO: We currently do not support lazy data routing for single input mode.
+            output = self.task(**kwargs)
+            self.last_run_finish_ms = time.time() * 1000
+            if output and (self.ftp_out or self.log_path):
+                output = self._write_output_to_disk(output)
+            # TODO: We also do not support enable_prune yet for single input mode.
+            return True, output
 
         if len(self.latest_msg) < len(signature(self.task).parameters):
             return False, None
@@ -110,25 +146,24 @@ class Compute(Loggable):
         output = self.task(**self.latest_msg)
         self.last_run_finish_ms = time.time() * 1000
 
-        # Write output to disk for lazy data routing and logging purposes.
         if output and (self.ftp_out or self.log_path):
-            ftp_output_dir = os.path.join(self.local_ftp_path, 'ftp_output')
-            pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
-            with open(os.path.join(ftp_output_dir, str(self.msg_out_uuid) + '.ftp'), 'wb') as f:
-                pickle.dump(output, f)
-            self.output_path = os.path.join(ftp_output_dir, str(self.msg_out_uuid) + '.ftp')
-            output = self.output_path if self.ftp_out else output
+            output = self._write_output_to_disk(output)
+
+        for op_from in self.latest_msg_used.keys():
+            self.latest_msg_used[op_from] = True
 
         # If no_overlap, reset latest_msg and latest_msg_time_ms so a message won't be processed twice.
         if self.no_overlap:
+            # TODO: also prune the existing message in self.latest_msg.
             self.latest_msg = dict()
             self.latest_msg_in_uuid = dict()
             self.latest_msg_publish_time_ms = dict()
             self.latest_msg_consumed_time_ms = dict()
+            self.latest_msg_used = False
 
         return True, output
 
-    def write_ahead_log(self, is_join_performed):
+    def write_ahead_log_to_file(self, is_join_performed):
         if self.log_path and (is_join_performed or self.is_log_verbose):
             pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
             log_start_time_ms = time.time() * 1000
@@ -152,6 +187,20 @@ class Compute(Loggable):
             if self.is_overhead_logged:
                 self.overhead_log(self.msg_out_uuid, log_file, log_start_time_ms)
 
+    # WAL to RocksDB
+    def write_ahead_log_to_rocksdb(self, is_join_performed):
+        import rocksdb
+        if self.log_path and (is_join_performed or self.is_log_verbose):
+            pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
+            log_start_time_ms = time.time() * 1000
+            log_file = os.path.join(self.log_path, self.log_filename + '.wal')
+            log_db = rocksdb.DB(log_file + '.db', rocksdb.Options(create_if_missing=True))
+            log_db.put(self.msg_out_uuid.bytes,
+                       f'{self.output_path},{self.last_run_start_ms},{self.last_run_finish_ms},{is_join_performed}'.encode())
+
+            if self.is_overhead_logged:
+                self.overhead_log(self.msg_out_uuid, log_file, log_start_time_ms)
+
     def __iter__(self):
         return self
 
@@ -170,14 +219,26 @@ class Compute(Loggable):
         self.msg_out_uuid = uuid.uuid4()  # pre-generate the UUID for the output message
 
         # On receive log. Note that payload is not logged here.
-        self.on_receive_log(msg_in_uuid, op_from, received_time_ms, self.msg_out_uuid)
+        self.on_receive_log_to_file(msg_in_uuid, op_from, received_time_ms, self.msg_out_uuid)
 
         data = self.gate_in(payload)  # path to file if ftp, raw data in bytes otherwise
         if data is not None:
+            if self.enable_prune:
+                # prune existing message from this op (propagate its UUID to upstream models)
+                if op_from not in self.prune_producers:
+                    self.prune_producers[op_from] = self.client.create_producer(f'{self.topic_prune_prefix}-{op_from}',
+                                                                                schema=pulsar.schema.BytesSchema())
+                if op_from in self.latest_msg_in_uuid and not self.latest_msg_used[op_from]:
+                    msg_prune = self.graph_codec.encode(msg_uuid=self.latest_msg_in_uuid[op_from], op_from=self.worker_id,
+                                                        payload=b'')
+                    self.prune_producers[op_from].send(msg_prune)
+
+            # update the latest message from this op
             self.latest_msg_publish_time_ms[op_from] = msg_in.publish_timestamp()
             self.latest_msg_consumed_time_ms[op_from] = time.time() * 1000
             self.latest_msg[op_from] = data
             self.latest_msg_in_uuid[op_from] = msg_in_uuid
+            self.latest_msg_used[op_from] = False
 
         if self.ftp_in:
             # download the file from FTP server and then delete the file from server
@@ -193,7 +254,7 @@ class Compute(Loggable):
             output = self.gate_out(output)
 
         # Write ahead log. If log_path is set, log the message in a CSV file.
-        self.write_ahead_log(ret)
+        self.write_ahead_log_to_file(ret)
 
         if output:
             if type(output) == str:

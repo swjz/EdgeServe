@@ -1,5 +1,4 @@
 import pulsar
-from pulsar.schema import AvroSchema
 import time
 import os
 import pickle
@@ -8,14 +7,19 @@ import pathlib
 
 from edgeserve.message_format import GraphCodec
 from edgeserve.util import local_to_global_path
-from edgeserve.logging import Loggable
+from edgeserve.loggable import Loggable
 
 
 class DataSource(Loggable):
-    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src', ftp_out=False, local_ftp_path='/srv/ftp/',
+    def __init__(self, stream, pulsar_node, source_id, gate=None, topic='src',
+                 topic_extra=None, ftp_out=False, local_ftp_path='/srv/ftp/',
                  log_path=None, log_filename=None, is_payload_logged=True, is_overhead_logged=False):
         self.client = pulsar.Client(pulsar_node)
         self.producer = self.client.create_producer(topic, schema=pulsar.schema.BytesSchema())
+        if topic_extra:
+            self.producer_extra = self.client.create_producer(topic_extra, schema=pulsar.schema.BytesSchema())
+        self.topic = topic
+        self.topic_extra = topic_extra
         self.stream = iter(stream)
         self.gate = (lambda x: x) if gate is None else gate
         assert len(source_id) <= 16, 'source_id must be at most 16 bytes long'
@@ -34,11 +38,11 @@ class DataSource(Loggable):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.client.close()
 
-    def write_ahead_log(self, msg_uuid, logged_data, data_collection_time_ms):
+    def write_ahead_log_to_file(self, topic, msg_uuid, logged_data, data_collection_time_ms):
         if self.log_path:
             pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
             log_start_time_ms = time.time() * 1000
-            log_file = os.path.join(self.log_path, self.log_filename + '.wal')
+            log_file = os.path.join(self.log_path, f'{self.log_filename}-{topic}.wal')
             if not os.path.exists(log_file):
                 with open(log_file, 'w') as f:
                     f.write('msg_uuid,payload,data_collection_time_ms\n')
@@ -47,19 +51,39 @@ class DataSource(Loggable):
             if self.is_overhead_logged:
                 self.overhead_log(msg_uuid, log_file, log_start_time_ms)
 
+    def write_ahead_log_to_rocksdb(self, msg_uuid, logged_data, data_collection_time_ms):
+        import rocksdb
+        if self.log_path:
+            pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
+            log_start_time_ms = time.time() * 1000
+            log_file = os.path.join(self.log_path, self.log_filename + '.wal')
+            log_db = rocksdb.DB(log_file + '.db', rocksdb.Options(create_if_missing=True))
+            log_db.put(msg_uuid.bytes, f'{logged_data},{data_collection_time_ms}'.encode())
+
+            if self.is_overhead_logged:
+                self.overhead_log(msg_uuid, log_file, log_start_time_ms)
+
     def __iter__(self):
         return self
 
     def __next__(self):
+        has_extra = False
         incoming = next(self.stream)
         if incoming is None:
             return None
+        if isinstance(incoming, tuple):
+            incoming, extra = incoming
+            if extra is not None:
+                has_extra = True
+                extra = self.gate(extra)
         data = self.gate(incoming)
         if data is None:
             return None
         data_collection_time_ms = time.time() * 1000
 
         msg_uuid = uuid.uuid4()
+        # For now, assume that lazy data routing only applies to the more frequent payload.
+        # Extra data is always sent to the extra topic in eager mode.
         if self.ftp_out or (self.log_path and not self.is_payload_logged):
             local_file_path = os.path.join(self.local_ftp_path, str(msg_uuid) + '.ftp')
             with open(local_file_path, 'wb') as f:
@@ -69,14 +93,19 @@ class DataSource(Loggable):
             if self.ftp_out:
                 data = global_file_path
 
-        message = self.graph_codec.encode(msg_uuid=msg_uuid, op_from=self.source_id, payload=data)
+        if has_extra:
+            msg_uuid_extra = uuid.uuid4()
+            self.write_ahead_log_to_file(self.topic_extra, msg_uuid_extra, extra, data_collection_time_ms)
+            message_extra = self.graph_codec.encode(msg_uuid=msg_uuid_extra, op_from=self.source_id, payload=extra)
+            self.producer_extra.send(message_extra)
 
         # Write ahead log.
         if self.is_payload_logged:
-            self.write_ahead_log(msg_uuid, data, data_collection_time_ms)
+            self.write_ahead_log_to_file(self.topic, msg_uuid, data, data_collection_time_ms)
         else:
-            self.write_ahead_log(msg_uuid, global_file_path, data_collection_time_ms)
+            self.write_ahead_log_to_file(self.topic, msg_uuid, global_file_path, data_collection_time_ms)
 
+        message = self.graph_codec.encode(msg_uuid=msg_uuid, op_from=self.source_id, payload=data)
         self.producer.send(message)
         return data
 
@@ -177,3 +206,38 @@ class SimulateVideoWithTimestamps(CameraSource):
                 break
         cap.release()
         cv2.destroyAllWindows()
+
+
+class AudioSource(DataSource):
+    def __init__(self, audio_path, pulsar_node, chunk_size_small, chunk_size_large,
+                 source_id, gate=None, topic='audio-src-small', topic_extra='audio-src-large'):
+        super().__init__(self.stream(), pulsar_node, source_id, gate, topic, topic_extra)
+        self.audio_path = audio_path
+        self.chunk_size_small = chunk_size_small
+        self.chunk_size_large = chunk_size_large
+        self.last_small_chunk_time = 0
+        self.last_large_chunk_time = 0
+
+    def stream(self):
+        from edgeserve.util import load_audio_chunk
+        import numpy as np
+        while True:
+            # receive new audio chunk (and e.g. wait for min_chunk_size seconds first, ...)
+            audio_chunk = load_audio_chunk(self.audio_path, self.last_small_chunk_time,
+                                           self.last_small_chunk_time + self.chunk_size_small)
+            if len(audio_chunk) == 0:
+                break
+            audio_chunk = audio_chunk.tobytes()
+            self.last_small_chunk_time += self.chunk_size_small
+
+            # Send both small and large chunks when the time comes
+            if self.last_large_chunk_time + self.chunk_size_large <= self.last_small_chunk_time:
+                audio_chunk_large = load_audio_chunk(self.audio_path, self.last_large_chunk_time,
+                                                     self.last_small_chunk_time)
+                self.last_large_chunk_time += self.chunk_size_large
+                if len(audio_chunk_large) > 0:
+                    audio_chunk_large = audio_chunk_large.tobytes()
+                    yield audio_chunk, audio_chunk_large
+
+            # If the large chunk is not ready yet, just send the small chunk
+            yield audio_chunk, None

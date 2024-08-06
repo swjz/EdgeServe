@@ -21,7 +21,7 @@ class Loggable:
                 f.write(f'{msg_uuid},{log_end_time_ms - log_start_time_ms}\n')
 
     # On receive log. Note that payload is not logged here.
-    def on_receive_log(self, msg_in_uuid, op_from, received_time_ms, msg_out_uuid):
+    def on_receive_log_to_file(self, msg_in_uuid, op_from, received_time_ms, msg_out_uuid):
         if self.log_path:
             pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
             log_start_time_ms = time.time() * 1000
@@ -31,6 +31,19 @@ class Loggable:
                     f.write('msg_in_uuid,op_from,received_time_ms,msg_out_uuid\n')
             with open(log_file, 'a') as f:
                 f.write(f'{msg_in_uuid},{op_from},{received_time_ms},{msg_out_uuid}\n')
+
+            if self.is_overhead_logged:
+                self.overhead_log(msg_in_uuid, log_file, log_start_time_ms)
+
+    # On receive log (RocksDB version). Note that payload is not logged here.
+    def on_receive_log_to_rocksdb(self, msg_in_uuid, op_from, received_time_ms, msg_out_uuid):
+        import rocksdb
+        if self.log_path:
+            pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
+            log_start_time_ms = time.time() * 1000
+            log_file = os.path.join(self.log_path, self.log_filename + '.orl')
+            log_db = rocksdb.DB(log_file + '.db', rocksdb.Options(create_if_missing=True))
+            log_db.put(msg_in_uuid.bytes, f'{op_from},{received_time_ms},{msg_out_uuid}'.encode())
 
             if self.is_overhead_logged:
                 self.overhead_log(msg_in_uuid, log_file, log_start_time_ms)
