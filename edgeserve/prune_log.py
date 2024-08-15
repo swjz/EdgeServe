@@ -15,6 +15,8 @@ from edgeserve.message_format import GraphCodec
 
 class PruneLog:
     """
+    Deprecated. Use the new PropagateKeepLog class instead. We transitioned from pruning logs to keeping logs.
+
     PruneLog class is used to prune the log files. Local logs are pruned if they are not used by downstream models.
     When a n-tuple message is skipped by a downstream model, it would send a message back to the upstream model as an
     indication that the n-tuple message is not needed. If the upstream model receives such after-skip messages from all

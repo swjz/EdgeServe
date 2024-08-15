@@ -39,6 +39,7 @@ class DataSource(Loggable):
         self.client.close()
 
     def write_ahead_log_to_file(self, topic, msg_uuid, logged_data, data_collection_time_ms):
+        # TODO: support logging more than one outputs (extra!)
         if self.log_path:
             pathlib.Path(self.log_path).mkdir(parents=True, exist_ok=True)
             log_start_time_ms = time.time() * 1000

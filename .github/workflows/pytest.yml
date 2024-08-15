@@ -52,4 +52,4 @@ jobs:
         stdbuf -oL python edgeserve/worker.py pulsar://localhost:6650 code-raw false false /srv/ftp/ > /tmp/pipe-raw &
         stdbuf -oL python edgeserve/worker.py pulsar://localhost:6650 code-ftp true false /srv/ftp/ > /tmp/pipe-ftp &
         stdbuf -oL python edgeserve/worker.py pulsar://localhost:6650 code-ftp-memory true true /srv/ftp/ > /tmp/pipe-ftp-memory &
-        pytest -s
+        pytest -s tests/test_pipeline.py tests/test_worker.py tests/test_logging.py

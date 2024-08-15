@@ -6,6 +6,46 @@ import time
 from urllib.error import URLError
 from urllib.parse import unquote, urlparse
 from functools import lru_cache
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from collections import deque
+
+
+class TailEventHandler(FileSystemEventHandler):
+    def __init__(self, filename):
+        self.filename = filename
+        self.lines = deque()
+        self.position = 0
+        with open(self.filename, 'r') as f:
+            f.seek(0, os.SEEK_END)
+            self.position = f.tell()
+
+    def on_modified(self, event):
+        if os.path.basename(event.src_path) == os.path.basename(self.filename):
+            with open(self.filename, 'r') as f:
+                f.seek(self.position)
+                new_lines = f.readlines()
+                if new_lines:
+                    self.lines.extend(new_lines)
+                    self.position = f.tell()
+
+
+def tail_generator(filepath, refresh_freq=0.1):
+    event_handler = TailEventHandler(filepath)
+    observer = Observer()
+    observer.schedule(event_handler, path=os.path.dirname(filepath), recursive=False)
+    observer.start()
+
+    try:
+        while True:
+            while event_handler.lines:
+                yield event_handler.lines.popleft().strip('\n')
+            time.sleep(refresh_freq)  # Sleep to wait for new lines
+    except KeyboardInterrupt:
+        observer.stop()
+    finally:
+        observer.stop()
+        observer.join()
 
 
 def local_to_global_path(local_file_path, local_ftp_path):
