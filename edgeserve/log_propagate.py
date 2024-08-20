@@ -17,29 +17,17 @@ class PropagateKeepLog:
     When an n-tuple message is marked as downstream-kept by an upstream model, it would send a message to the downstream
     model as an indication that the n-tuple message is needed there.
     """
-    def __init__(self, pulsar_node, topic_keep_prefix, log_path, log_prefix, propagator_id, outgoing_op):
+    def __init__(self, pulsar_node, topic_keep_prefix, log_path, log_prefix, outgoing_op):
         self.client = pulsar.Client(pulsar_node)
         self.topic_keep_prefix = topic_keep_prefix
         self.log_name = os.path.join(log_path, log_prefix)
         self.producers = dict()
         self.graph_codec = GraphCodec(msg_uuid_size=16, op_from_size=16, header_size=0)
-        self.propagator_id = propagator_id
-        topic = f'{self.topic_keep_prefix}-{propagator_id}'
+        self.propagator_id = log_prefix  # Use the log prefix as the propagator id
+        topic = f'{self.topic_keep_prefix}-{self.propagator_id}'
         self.consumer = self.client.subscribe(topic, subscription_name=f'propagator-{self.propagator_id}',
                                               schema=pulsar.schema.BytesSchema())
         self.outgoing_op = outgoing_op  # FIXME: hardcoded for now. This should be read from the graph.
-        # self.incoming_ops = []
-        # self.load_graph()
-
-    def load_graph(self):
-        """
-        This method is responsible for loading the local graph.
-        The local graph only has to contain input and output op names of the model at this node.
-        """
-        with open(self.log_name + '.graph', 'rb') as f:
-            graph = pickle.load(f)
-            self.incoming_ops = graph['incoming_ops']
-            # self.outgoing_ops = graph['outgoing_ops']
 
     def write_to_keep(self, keep_file, line):
         with open(keep_file, 'a') as keep:
@@ -129,10 +117,9 @@ if __name__ == "__main__":
     parser.add_argument('--topic-keep-prefix', type=str, default='keep', help='Keep topic prefix')
     parser.add_argument('--log-path', type=str, default='./', help='Log path')
     parser.add_argument('--log-prefix', type=str, default='model1', help='Log prefix')
-    parser.add_argument('--propagator-id', type=str, default='model1', help='Propagator ID')
     parser.add_argument('--outgoing-op', type=str, help='Outgoing op name from this node')  # FIXME: temporary hack
     args = parser.parse_args()
 
     propagate_keep_log = PropagateKeepLog(args.pulsar_node, args.topic_keep_prefix, args.log_path, args.log_prefix,
-                                          args.propagator_id, args.outgoing_op)
+                                          args.outgoing_op)
     propagate_keep_log.receive_keep_message()
