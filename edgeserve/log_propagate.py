@@ -41,6 +41,10 @@ class PropagateKeepLog:
             self.incoming_ops = graph['incoming_ops']
             # self.outgoing_ops = graph['outgoing_ops']
 
+    def write_to_keep(self, keep_file, line):
+        with open(keep_file, 'a') as keep:
+            keep.write(line)
+
     def find_outgoing_msg(self, incoming_msg_uuid):
         # find the outgoing messages that corresponds to the incoming message
         # FIXME: We should generalize the number of outgoing ops in ORL too.
@@ -50,6 +54,7 @@ class PropagateKeepLog:
             for line in logs:
                 if incoming_msg_uuid in line:
                     outgoing_msg_uuids.append(line.split(',')[-1])
+                    self.write_to_keep(self.log_name + '.orl.keep', line)
         return outgoing_msg_uuids
 
     def find_incoming_msg(self, outgoing_msg_uuid):
@@ -57,15 +62,17 @@ class PropagateKeepLog:
         incoming_msg_uuids_dict = defaultdict(list)
         with open(self.log_name + '.wal', 'r') as f:
             header = f.readline()
-            # FIXME: We currently assume only two incoming ops. This should be generalized.
-            op1, op2 = header.split(',')[0], header.split(',')[1]
             logs = f.readlines()
             for line in logs:
                 if outgoing_msg_uuid in line:
-                    if line.split(',')[1] != 'None':
-                        incoming_msg_uuids_dict[op1].append(line.split(',')[1])
-                    if line.split(',')[2] != 'None':
-                        incoming_msg_uuids_dict[op2].append(line.split(',')[2])
+                    num_input_ops = len(line.split(',')) - 5
+                    is_kept = False
+                    for i in range(num_input_ops):
+                        if line.split(',')[i] != 'None':
+                            incoming_msg_uuids_dict[header.split(',')[i]].append(line.split(',')[i])
+                            is_kept = True
+                    if is_kept:
+                        self.write_to_keep(self.log_name + '.wal.keep', line)
         return incoming_msg_uuids_dict
 
     def receive_keep_message(self):
@@ -117,12 +124,12 @@ class PropagateKeepLog:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Propagate Keep Log')
-    parser.add_argument('--pulsar_node', type=str, default='pulsar://localhost:6650',
+    parser.add_argument('--pulsar-node', type=str, default='pulsar://localhost:6650',
                         help='Pulsar node address')
-    parser.add_argument('--topic_keep_prefix', type=str, default='keep', help='Keep topic prefix')
-    parser.add_argument('--log_path', type=str, default='./', help='Log path')
-    parser.add_argument('--log_prefix', type=str, default='log', help='Log prefix')
-    parser.add_argument('--propagator_id', type=str, default='propagator', help='Propagator ID')
+    parser.add_argument('--topic-keep-prefix', type=str, default='keep', help='Keep topic prefix')
+    parser.add_argument('--log-path', type=str, default='./', help='Log path')
+    parser.add_argument('--log-prefix', type=str, default='model1', help='Log prefix')
+    parser.add_argument('--propagator-id', type=str, default='model1', help='Propagator ID')
     parser.add_argument('--outgoing-op', type=str, help='Outgoing op name from this node')  # FIXME: temporary hack
     args = parser.parse_args()
 

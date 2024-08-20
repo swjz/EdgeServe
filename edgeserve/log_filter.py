@@ -5,6 +5,10 @@ from edgeserve.message_format import GraphCodec
 
 
 class LogFilter:
+    """
+    LogFilter class is used to filter logs. Logs are kept if they pass the given filter_method.
+    Keep-log messages can be propagated to upstream and downstream operators based on return values of filter_method.
+    """
     def __init__(self, pulsar_node, log_file, filter_method, worker_id, topics_in, topic_out=None, topic_keep_prefix='keep'):
         self.client = pulsar.Client(pulsar_node)
         self.log_file = log_file
@@ -68,6 +72,7 @@ class WalFilter(LogFilter):
         super().__init__(pulsar_node, log_file, filter_method, worker_id, topics_in)
 
     def get_msg_id_from_line(self, line):
+        # FIXME: We currently assume only two incoming ops. This should be generalized.
         stream1_msg_id = line.split(',')[0]
         stream2_msg_id = line.split(',')[1]
         out_msg_id = line.split(',')[2]
