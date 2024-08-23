@@ -46,9 +46,9 @@ class DataSource(Loggable):
             log_file = os.path.join(self.log_path, f'{self.log_filename}-{topic}.wal')
             if not os.path.exists(log_file):
                 with open(log_file, 'w') as f:
-                    f.write('msg_uuid,payload,data_collection_time_ms\n')
+                    f.write('msg_out_uuid,msg_out_payload,data_collection_time_ms,,\n')
             with open(log_file, 'a') as f:
-                f.write(f'{msg_uuid},{logged_data},{data_collection_time_ms}\n')
+                f.write(f'{msg_uuid},{logged_data},{data_collection_time_ms},,\n')
             if self.is_overhead_logged:
                 self.overhead_log(msg_uuid, log_file, log_start_time_ms)
 
@@ -86,7 +86,9 @@ class DataSource(Loggable):
         # For now, assume that lazy data routing only applies to the more frequent payload.
         # Extra data is always sent to the extra topic in eager mode.
         if self.ftp_out or (self.log_path and not self.is_payload_logged):
-            local_file_path = os.path.join(self.local_ftp_path, str(msg_uuid) + '.ftp')
+            ftp_output_dir = os.path.join(self.local_ftp_path, 'ftp_output')
+            pathlib.Path(ftp_output_dir).mkdir(exist_ok=True)
+            local_file_path = os.path.join(ftp_output_dir, str(msg_uuid) + '.ftp')
             with open(local_file_path, 'wb') as f:
                 pickle.dump(data, f)
             global_file_path = local_to_global_path(local_file_path, self.local_ftp_path)

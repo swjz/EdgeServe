@@ -182,7 +182,7 @@ class Compute(Loggable):
                     else:
                         f.write('None,')
                 f.write(str(self.msg_out_uuid) + ',' + str(self.output_path) + ',' + str(self.last_run_start_ms) + ',' +
-                        str(self.last_run_finish_ms) + ',' + str(is_join_performed) + '\n')
+                        str(self.last_run_finish_ms) + ',' + str(is_join_performed)[0] + '\n')
 
             if self.is_overhead_logged:
                 self.overhead_log(self.msg_out_uuid, log_file, log_start_time_ms)

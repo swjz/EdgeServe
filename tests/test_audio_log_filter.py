@@ -16,7 +16,6 @@ def raw_data():
         return False, False
 
     return {'node': 'pulsar://localhost:6650',
-            'gate-aggr-in': lambda x: pickle.loads(x),
             'filter': filter_method}
 
 
