@@ -220,6 +220,8 @@ class AudioSource(DataSource):
         self.chunk_size_large = chunk_size_large
         self.last_small_chunk_time = 0
         self.last_large_chunk_time = 0
+        self.last_small_sent_wall_time = time.time()
+        self.last_large_sent_wall_time = time.time()
 
     def stream(self):
         from edgeserve.util import load_audio_chunk
@@ -240,7 +242,15 @@ class AudioSource(DataSource):
                 self.last_large_chunk_time += self.chunk_size_large
                 if len(audio_chunk_large) > 0:
                     audio_chunk_large = audio_chunk_large.tobytes()
+                    # Simulate the actual wall time speed of audio playing
+                    while time.time() - self.last_large_sent_wall_time < self.chunk_size_large:
+                        time.sleep(0.001)
+                    self.last_large_sent_wall_time = time.time()
                     yield audio_chunk, audio_chunk_large
 
-            # If the large chunk is not ready yet, just send the small chunk
+            # Simulate the actual wall time speed of audio playing
+            while time.time() - self.last_small_sent_wall_time < self.chunk_size_small:
+                time.sleep(0.001)
+            self.last_small_sent_wall_time = time.time()
+            # Always send the small chunk no matter if the large chunk is ready or not
             yield audio_chunk, None
