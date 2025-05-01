@@ -43,7 +43,6 @@ class Materialize(Loggable):
         received_time_ms = time.time() * 1000
 
         data = self.gate(payload)
-        output = data
 
         # On receive log. Note that payload is not logged here.
         self.on_receive_log_to_file(msg_in_uuid, op_from, received_time_ms, None)
@@ -58,6 +57,8 @@ class Materialize(Loggable):
             self.materialize(local_file_path)
             global_file_path = local_to_global_path(local_file_path, self.local_ftp_path)
             output = global_file_path
+        else:
+            output = self.materialize(data)
 
         task_finish_time_ms = time.time() * 1000
 
