@@ -1,18 +1,18 @@
 import hashlib
 import os
 import random
-import socket
 import string
 import time
 import uuid
 
 import pytest
 
+# Pure-unit tests: do NOT import HeaderCatalog / HeaderPublisher / SemanticCacheClient
+# at module level -- those pull in `pulsar` at import time, which would prevent
+# the mock_pulsar install() in the integration test file from taking effect.
 from edgeserve.semantic_cache import (
     CacheHeader,
     CacheHttpServer,
-    HeaderCatalog,
-    HeaderPublisher,
     SemanticBloomFilter,
     http_fetch,
 )
@@ -95,11 +95,12 @@ def _make_header(node_uri='http://a:1', entities=(), created_ms=None):
 
 
 class _FakeCatalog:
-    """HeaderCatalog without the Pulsar consumer thread, for unit-testing lookup/TTL."""
+    """HeaderCatalog-shaped stub for unit-testing lookup/TTL without Pulsar.
 
-    insert = HeaderCatalog.insert
-    _evict_expired = HeaderCatalog._evict_expired
-    lookup = HeaderCatalog.lookup
+    Reimplements the three helpers inline so this file never has to import
+    `edgeserve.semantic_cache.catalog`, which pulls in `pulsar` at import
+    time and would preempt the mock install in the integration suite.
+    """
 
     def __init__(self, ttl_ms=10 * 60 * 1000):
         import threading
@@ -107,6 +108,27 @@ class _FakeCatalog:
         self._headers = {}
         self._lock = threading.Lock()
         self.rank_fn = lambda h: h.created_ms
+
+    def insert(self, header):
+        with self._lock:
+            self._headers[header.block_uuid] = header
+
+    def _evict_expired(self):
+        cutoff = time.time() * 1000 - self.ttl_ms
+        with self._lock:
+            stale = [u for u, h in self._headers.items() if h.created_ms < cutoff]
+            for u in stale:
+                del self._headers[u]
+
+    def lookup(self, entities):
+        ents = list(entities)
+        with self._lock:
+            candidates = [
+                h for h in self._headers.values()
+                if all(e in h.bloom for e in ents)
+            ]
+        candidates.sort(key=self.rank_fn, reverse=True)
+        return candidates
 
 
 def test_catalog_lookup_and_ranking():
@@ -152,48 +174,6 @@ def test_http_server_round_trip(tmp_path):
             http_fetch(f'http://127.0.0.1:{srv.port}', missing)
 
 
-# ---------- Integration test (requires Pulsar on localhost:6650) ----------
-
-PULSAR_URL = os.environ.get('EDGESERVE_PULSAR_URL', 'pulsar://localhost:6650')
-
-
-def _pulsar_available():
-    try:
-        s = socket.create_connection(('localhost', 6650), timeout=0.5)
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
-@pytest.mark.skipif(not _pulsar_available(), reason='Pulsar broker not reachable on localhost:6650')
-def test_cross_node_discovery():
-    """Publisher on node A, catalog on node B; B discovers A's header by entity."""
-    topic = f'kvcache-headers-test-{uuid.uuid4().hex[:8]}'
-
-    with HeaderPublisher(PULSAR_URL, topic=topic) as pub, \
-         HeaderCatalog(PULSAR_URL, node_id=f'node-b-{uuid.uuid4().hex[:8]}', topic=topic,
-                       ttl_ms=60_000) as cat:
-        time.sleep(0.5)  # let the subscriber attach
-        bf = SemanticBloomFilter(m_bits=4096, k=5)
-        bf.add('file_diff_v2.py')
-        header = CacheHeader(
-            block_uuid=uuid.uuid4(),
-            node_uri='http://node-a:9100',
-            prefix_hash=b'\x00' * 32,
-            bloom=bf,
-        )
-        pub.publish(header)
-
-        deadline = time.time() + 5.0
-        hits = []
-        while time.time() < deadline:
-            hits = cat.lookup({'file_diff_v2.py'})
-            if hits:
-                break
-            time.sleep(0.05)
-        assert hits, 'catalog did not observe the published header in time'
-        assert hits[0].block_uuid == header.block_uuid
-        assert hits[0].node_uri == 'http://node-a:9100'
-
-        assert cat.lookup({'not-in-any-header'}) == []
+# Cross-node discovery is covered by the mock-backed suite in
+# tests/test_semantic_cache_integration.py, which exercises the real
+# HeaderCatalog / HeaderPublisher classes against an in-process mock broker.

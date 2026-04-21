@@ -15,10 +15,11 @@ from edgeserve.loggable import Loggable
 
 class Compute(Loggable):
     def __init__(self, task, pulsar_node, worker_id='worker1', gate_in=None, gate_out=None, ftp_in=False, ftp_out=False,
-                 ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
+                 ftp_memory=True, ftp_delete=False, local_ftp_path='/srv/ftp/', topic_in='src', topic_out='dst',
                  topic_prune_prefix='prune', max_time_diff_ms=10 * 1000, no_overlap=False, min_interval_ms=0,
                  log_path=None, log_filename=None, drop_if_older_than_ms=None, is_log_verbose=False,
-                 is_overhead_logged=False, enable_prune=False, single_input=False):
+                 is_overhead_logged=False, enable_prune=False, single_input=False,
+                 semantic_cache=None):
         """Initializes a compute operator.
 
         Args:
@@ -29,6 +30,7 @@ class Compute(Loggable):
             gate_out: The gating function applied to output stream.
             ftp_in: When set to `True`, lazy routing mode is enabled for the input stream.
             ftp_out: When set to `True`, lazy routing mode is enabled for the output stream.
+            ftp_memory: When set to `True`, the fetched data stays temporarily in memory. Otherwise, it is written to disk.
             ftp_delete: When set to `True`, delete remote data after fetching is complete. Only effective when `ftp=True`.
             local_ftp_path: The local FTP path served by an active FTP server. Other nodes fetch data from this path.
             topic_in: Pulsar topic of the input data stream.
@@ -59,6 +61,7 @@ class Compute(Loggable):
         self.gate_out = (lambda x: x) if gate_out is None else gate_out
         self.ftp_in = ftp_in  # consider changing this name to ftp_in
         self.ftp_out = ftp_out
+        self.ftp_memory = ftp_memory
         self.ftp_delete = ftp_delete
         self.local_ftp_path = local_ftp_path
         self.latest_msg = dict()
@@ -79,6 +82,14 @@ class Compute(Loggable):
         self.latest_msg_used = dict()
         self.enable_prune = enable_prune
         self.single_input = single_input
+        # Semantic Cache Routing: injected as a task kwarg if the task signature
+        # declares a parameter named `semantic_cache`. Tasks use its
+        # `.resolve(entities)` and `.publish(entities, data)` API to reuse
+        # KV-cache blocks across peer nodes. See edgeserve/semantic_cache/.
+        self.semantic_cache = semantic_cache
+        self._injected_kwargs = {}
+        if semantic_cache is not None:
+            self._injected_kwargs['semantic_cache'] = semantic_cache
 
     def __enter__(self):
         return self
@@ -108,7 +119,7 @@ class Compute(Loggable):
             param_names = self.task.__code__.co_varnames[:self.task.__code__.co_argcount]
             for param in param_names:
                 if param not in kwargs:
-                    kwargs[param] = None
+                    kwargs[param] = self._injected_kwargs.get(param, None)
             self.last_run_start_ms = time.time() * 1000
             # TODO: We currently do not support lazy data routing for single input mode.
             output = self.task(**kwargs)
@@ -118,7 +129,9 @@ class Compute(Loggable):
             # TODO: We also do not support enable_prune yet for single input mode.
             return True, output
 
-        if len(self.latest_msg) < len(signature(self.task).parameters):
+        task_params = signature(self.task).parameters
+        upstream_param_count = sum(1 for p in task_params if p not in self._injected_kwargs)
+        if len(self.latest_msg) < upstream_param_count:
             return False, None
 
         earliest = None
@@ -135,15 +148,25 @@ class Compute(Loggable):
         # Lazy data routing: only fetch data from FTP counterpart when we actually need it.
         if self.ftp_in:
             for op_from in self.latest_msg.keys():
-                if 'ftp://' in self.latest_msg[op_from]:
-                    local_file_path = ftp_fetch(self.latest_msg[op_from], self.local_ftp_path, memory=not self.ftp_out,
-                                                delete=self.ftp_delete)
-                    with open(local_file_path, 'rb') as f:
-                        self.latest_msg[op_from] = pickle.load(f)
+                if isinstance(self.latest_msg[op_from], str) and 'ftp://' in self.latest_msg[op_from]:
+                    if self.ftp_memory:
+                        raw_data = ftp_fetch(self.latest_msg[op_from], self.local_ftp_path,
+                                             memory=self.ftp_memory, delete=self.ftp_delete)
+                        self.latest_msg[op_from] = pickle.loads(raw_data)
+                    else:
+                        local_file_path = ftp_fetch(self.latest_msg[op_from], self.local_ftp_path,
+                                                    memory=self.ftp_memory, delete=self.ftp_delete)
+                        with open(local_file_path, 'rb') as f:
+                            self.latest_msg[op_from] = pickle.load(f)
                     # P2P data fetching log.
-                    self.p2p_log(self.latest_msg_in_uuid[op_from], op_from, local_file_path)
+                    self.p2p_log(self.latest_msg_in_uuid[op_from], op_from,
+                                 'memory' if self.ftp_memory else local_file_path)
 
-        output = self.task(**self.latest_msg)
+        call_kwargs = dict(self.latest_msg)
+        for name, val in self._injected_kwargs.items():
+            if name in task_params:
+                call_kwargs[name] = val
+        output = self.task(**call_kwargs)
         self.last_run_finish_ms = time.time() * 1000
 
         if output and (self.ftp_out or self.log_path):
@@ -219,6 +242,8 @@ class Compute(Loggable):
         self.msg_out_uuid = uuid.uuid4()  # pre-generate the UUID for the output message
 
         # On receive log. Note that payload is not logged here.
+        # Note that msg_out_uuid is freshly generated here and the actual message might not exist, if the task is not
+        # performed or gives no output.
         self.on_receive_log_to_file(msg_in_uuid, op_from, received_time_ms, self.msg_out_uuid)
 
         data = self.gate_in(payload)  # path to file if ftp, raw data in bytes otherwise
@@ -229,7 +254,8 @@ class Compute(Loggable):
                     self.prune_producers[op_from] = self.client.create_producer(f'{self.topic_prune_prefix}-{op_from}',
                                                                                 schema=pulsar.schema.BytesSchema())
                 if op_from in self.latest_msg_in_uuid and not self.latest_msg_used[op_from]:
-                    msg_prune = self.graph_codec.encode(msg_uuid=self.latest_msg_in_uuid[op_from], op_from=self.worker_id,
+                    msg_prune = self.graph_codec.encode(msg_uuid=self.latest_msg_in_uuid[op_from],
+                                                        op_from=self.worker_id,
                                                         payload=b'')
                     self.prune_producers[op_from].send(msg_prune)
 
@@ -249,9 +275,9 @@ class Compute(Loggable):
         ret, output = self._try_task()
 
         if ret and output:
-            if self.ftp_out:
-                output = local_to_global_path(output, self.local_ftp_path)
             output = self.gate_out(output)
+            if self.ftp_out:
+                output = local_to_global_path(output, self.local_ftp_path).encode('utf-8')
 
         # Write ahead log. If log_path is set, log the message in a CSV file.
         self.write_ahead_log_to_file(ret)

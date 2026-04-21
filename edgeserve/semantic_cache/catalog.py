@@ -31,7 +31,7 @@ class HeaderCatalog:
             subscription_name=f'catalog-{node_id}',
             consumer_type=ConsumerType.Exclusive,
             schema=pulsar.schema.BytesSchema(),
-            initial_position=InitialPosition.Latest,
+            initial_position=InitialPosition.Earliest,
         )
         self.ttl_ms = ttl_ms
         self.rank_fn = rank_fn if rank_fn is not None else (lambda h: h.created_ms)
