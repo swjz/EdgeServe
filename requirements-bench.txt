@@ -1,0 +1,6 @@
+torch>=2.0
+transformers>=4.36
+safetensors>=0.4
+# Optional: install on GPU boxes to unlock the real vllm / sglang baselines.
+# vllm>=0.6.0
+# sglang>=0.3.0
