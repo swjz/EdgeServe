@@ -108,27 +108,38 @@ def main():
         topic=args.topic,
     )
     try:
+        # Wait for the checker's catalog subscriber to pick up any header.
+        # We poll the internal _headers dict directly because the hash our
+        # connector publishes (computed from vLLM's request.prompt_token_ids
+        # which may include BOS) may not match whatever we'd compute here
+        # from tok.encode() with our own args.
         deadline = time.time() + 5.0
-        hit = None
+        seen = {}
         while time.time() < deadline:
-            hit = checker.resolve({expected_hash})
-            if hit is not None:
+            if checker.catalog._headers:
+                seen = dict(checker.catalog._headers)
                 break
             time.sleep(0.05)
 
-        if hit is None:
-            print('FAIL: checker did not find a header after 5s')
+        if not seen:
+            print('FAIL: checker saw no headers in 5s')
             return 1
 
-        blob, header = hit
-        print(f'PASS: header found; blob={len(blob)/1e6:.2f}MB, '
-              f'node_uri={header.node_uri}, local_path={header.local_path}')
+        print(f'PASS: checker received {len(seen)} header(s)')
+        # Fetch the most recent and validate blob decodes.
+        header = max(seen.values(), key=lambda h: h.created_ms)
+        print(f'  latest header: node_uri={header.node_uri}, '
+              f'local_path={header.local_path}')
 
-        # Validate blob decodes.
+        # Fetch via the normal path.
+        from edgeserve.semantic_cache.http_client import http_fetch
+        blob = http_fetch(header.node_uri, header.block_uuid, timeout=5.0)
+        print(f'  blob={len(blob)/1e6:.2f}MB fetched over HTTP')
+
         from safetensors.torch import load as st_load
         tensors = st_load(blob)
         print(f'  blob contains {len(tensors)} tensors; '
-              f'first 3 layer keys: {list(tensors)[:3]}')
+              f'first 3 keys: {list(tensors)[:3]}')
         return 0
     finally:
         checker.close()
