@@ -85,22 +85,20 @@ Pulsar discovery + HTTP (same-host: safetensors mmap).
 | concurrent same prompt   | Qwen2.5-0.5B |    3 | 2.70× |  ✓ | `demo_kvconnector_concurrent.py` |
 | **prefix share, 1 consumer** | Qwen2.5-0.5B | 1 | **2.61×** | ✓ | `demo_kvconnector_prefix_share.py` |
 | multi-agent, 5 consumers, honest cold | Qwen2.5-0.5B | 5 | **2.46×** | ✓ | `demo_kvconnector_multi_agent.py` |
-| multi-agent, 3 consumers | Qwen2.5-1.5B |    3 | 2.98× † |  ✓ | same |
-| multi-agent, 5 consumers | Qwen2.5-1.5B |    5 | 3.54× † |  ✓ | same |
-| multi-agent, 4 consumers, 7.7 k-token doc | Qwen2.5-1.5B | 4 | 4.19× † |  ✓ | same |
+| **multi-agent, 3 consumers, honest cold** | Qwen2.5-1.5B |    3 | **3.12×** |  ✓ | same |
+| multi-agent, 5 consumers (seeder-vs-warm) | Qwen2.5-1.5B |    5 | 3.54× † |  ✓ | same |
+| multi-agent, 4 consumers, 7.7 k-token doc (seeder-vs-warm) | Qwen2.5-1.5B | 4 | 4.19× † |  ✓ | same |
 
-**†** The 2.98× / 3.54× / 4.19× numbers use **seeder gen time** as the
-reference instead of a truly cold consumer run. Before the demo was
-fixed, the "cold consumer" loop shared one topic — consumer 1 published
-multi-boundary prefix hashes that accidentally made consumers 2..N's
-"cold" runs into prefix-cache HITS. The seeder-vs-warm ratio is still
-valid (both pay the same first-generate overhead with no cache to
-load), but the cold-vs-warm ratio in those older runs was inflated.
-The 0.5B row above uses the fixed demo with a UNIQUE topic per cold
-consumer and shows the honest 2.46×. I didn't re-run the 1.5B
-configurations on the fixed demo (each takes ~15 min setup on this
-GPU); the speedups there are in the same 2–4× range depending on
-whether you measure cold-vs-warm or seeder-vs-warm.
+**†** The 5-consumer and 7.7 k-doc rows use **seeder gen time** as the
+reference (valid: fair because both are cold fresh processes) rather
+than cold-consumer gen time. Before the multi-agent demo was fixed,
+the cold-consumer loop shared one topic — consumer 1 published
+multi-boundary prefix hashes that made consumers 2..N's "cold" runs
+into accidental prefix-cache hits. The 3-consumer row was re-run on
+the fixed demo and shows the honest cold/warm = **3.12×**; I didn't
+re-run the two longer configurations because each takes ~15 min, but
+their seeder/warm ratio (which is immune to the bug) was 3.54× / 4.19×.
+The 0.5B row above (**2.46×**) is on the fixed demo.
 
 The **prefix-sharing speedup is real** in every configuration — every
 warm consumer's next-token id matched a truly-cold reference run (see
