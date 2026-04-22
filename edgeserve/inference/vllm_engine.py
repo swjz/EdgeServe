@@ -42,8 +42,18 @@ class VLLMEngine(InferenceEngine):
         enable_prefix_caching: bool = True,
         gpu_memory_utilization: float = 0.5,
         max_model_len: Optional[int] = None,
+        kv_transfer_config=None,
         **extra_llm_kwargs,
     ):
+        """
+        Args:
+            kv_transfer_config: Optional `vllm.config.KVTransferConfig` to
+                plug in a KV connector (e.g., `EdgeServeKVConnector`) for
+                cross-process KV cache sharing. When used with EdgeServe's
+                connector, set `enable_prefix_caching=False` so the
+                connector is the only cache layer and every request round-trips
+                through EdgeServe instead of racing vLLM's internal radix.
+        """
         from vllm import LLM, SamplingParams
 
         if device != 'cuda':
@@ -61,6 +71,8 @@ class VLLMEngine(InferenceEngine):
         )
         if max_model_len is not None:
             llm_kwargs['max_model_len'] = max_model_len
+        if kv_transfer_config is not None:
+            llm_kwargs['kv_transfer_config'] = kv_transfer_config
         llm_kwargs.update(extra_llm_kwargs)
         self._llm = LLM(**llm_kwargs)
         self._tokenizer = self._llm.get_tokenizer()
