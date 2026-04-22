@@ -282,10 +282,18 @@ def main():
                     'EDGESERVE_DTYPE': args.dtype,
                 })
                 workers.append(proc)
+                if args.engine == 'vllm':
+                    # vLLM profiles GPU memory at init; parallel worker inits
+                    # race on "available memory" and both end up allocating
+                    # less than they asked for. Serialize spawns: wait for this
+                    # worker's READY before starting the next.
+                    ready_infos = locals().setdefault('ready_infos', [])
+                    ready_infos.append(_await_ready(proc, f'worker-{i}'))
 
-            ready_infos = []
+            ready_infos = locals().get('ready_infos', [])
             for i, w in enumerate(workers):
-                ready_infos.append(_await_ready(w, f'worker-{i}'))
+                if i >= len(ready_infos):
+                    ready_infos.append(_await_ready(w, f'worker-{i}'))
             print(f'  all {len(workers)} workers ready', flush=True)
 
             trials = []
