@@ -114,18 +114,37 @@ def main():
               f'matched={matched}')
 
     # Summary
+    #
+    # Note: vLLM persists its torch.compile artifacts to
+    # ~/.cache/vllm/torch_compile_cache/. The FIRST cold-baseline
+    # subprocess in a fresh environment pays the full compile cost; runs
+    # 2..N after it benefit from that cache. So cold[0] is the only
+    # cold measurement that's truly apples-to-apples with "first ever
+    # time seeing this model". For the multi-agent story the cleanest
+    # comparison is **seeder (full prefill) vs warm consumer (cache load
+    # + tiny suffix)** -- both pay the same compile cost and hit the
+    # same GPU state.
     print()
     print('=== summary ===')
-    cold_median = statistics.median(cold_times)
     warm_median = statistics.median(warm_times)
-    print(f'cold gen median:   {cold_median:.1f}ms  '
-          f'(range {min(cold_times):.1f}..{max(cold_times):.1f})')
-    print(f'warm gen median:   {warm_median:.1f}ms  '
-          f'(range {min(warm_times):.1f}..{max(warm_times):.1f})')
+    warm_min = min(warm_times)
+    warm_max = max(warm_times)
+    print(f'seeder gen (full doc prefill): {seed_r["gen_ms"]:.1f}ms')
+    print(f'warm consumer gen (cache hit + suffix): {warm_median:.1f}ms median '
+          f'(range {warm_min:.1f}..{warm_max:.1f})')
     if warm_median > 0:
-        print(f'multi-agent prefix-hit speedup: {cold_median/warm_median:.2f}x')
+        print(f'seeder / warm-consumer speedup: '
+              f'{seed_r["gen_ms"] / warm_median:.2f}x')
+    print(f'consumers with verified cache hit: {len(warm_times)}')
     correctness = all(c == w for c, w in zip(cold_tokens, warm_tokens))
     print(f'correctness (every consumer warm == cold): {correctness}')
+
+    # Also show the fair cold comparison for consumer 1 (first cold run,
+    # pre-compile-cache).
+    if cold_times:
+        print(f'(aside: fair cold gen for consumer 1 = {cold_times[0]:.1f}ms; '
+              f'later cold runs saw {cold_times[1]:.1f}ms due to torch.compile '
+              f'disk cache warmup)')
     return 0 if correctness else 1
 
 
