@@ -74,14 +74,16 @@ def main():
     doc = 'Chicago is on Lake Michigan and was founded in 1833. ' * args.doc_repeats
     suffixes = DEFAULT_SUFFIXES[:args.num_consumers + 1]
 
-    # Cold baselines: run each consumer WITHOUT a seeder to get the cold
-    # prefill time for each suffix.
-    cold_topic = f'{topic}-cold'
+    # Cold baselines: run each consumer WITHOUT any seeded cache. CRITICAL:
+    # each cold run uses a UNIQUE topic so the connector's multi-boundary
+    # publish from consumer 1 can't leak into consumer 2..N's catalog
+    # (they share a doc prefix with consumer 1 and would otherwise hit).
     cold_times = []
     cold_tokens = []
-    print(f'\n--- cold baselines ({len(suffixes)-1} consumers, no cache)')
+    print(f'\n--- cold baselines ({len(suffixes)-1} consumers, no cache, per-consumer topic)')
     for i, suf in enumerate(suffixes[1:], start=1):
-        r, _ = run(doc + suf, cold_topic, 'consumer', args)
+        per_consumer_cold_topic = f'{topic}-cold-{i}'
+        r, _ = run(doc + suf, per_consumer_cold_topic, 'consumer', args)
         cold_times.append(r['gen_ms'])
         cold_tokens.append(r['output_token'])
         print(f'  consumer {i} (suffix={suf[:30]!r}...): '
@@ -139,12 +141,12 @@ def main():
     correctness = all(c == w for c, w in zip(cold_tokens, warm_tokens))
     print(f'correctness (every consumer warm == cold): {correctness}')
 
-    # Also show the fair cold comparison for consumer 1 (first cold run,
-    # pre-compile-cache).
-    if cold_times:
-        print(f'(aside: fair cold gen for consumer 1 = {cold_times[0]:.1f}ms; '
-              f'later cold runs saw {cold_times[1]:.1f}ms due to torch.compile '
-              f'disk cache warmup)')
+    import statistics as _s
+    cold_median = _s.median(cold_times)
+    cold_speedup = cold_median / warm_median if warm_median > 0 else 0
+    print(f'cold consumer gen (fresh per-topic, no cache): {cold_median:.1f}ms median '
+          f'(range {min(cold_times):.1f}..{max(cold_times):.1f})')
+    print(f'cold / warm speedup: {cold_speedup:.2f}x')
     return 0 if correctness else 1
 
 
