@@ -275,6 +275,37 @@ confirming the connector path is stable whether the vLLM instances are
 sequential or simultaneous. Concurrent is the more realistic
 deployment scenario.
 
+### Prefix sharing: different suffixes hit the same doc cache
+
+This is the scenario the Semantic Cache Routing paper is really about:
+multiple agents ask **different questions** about the same document.
+Each agent's prompt = `doc + agent_specific_suffix`. Without prefix
+matching the two prompts have different full-prefix hashes and miss
+each other's cache. With prefix-boundary publishing, the consumer
+finds the cached entry via the longest shared block-aligned prefix.
+
+`scripts/demo_kvconnector_prefix_share.py` runs:
+- seeder A: `doc + " As a scientist, discuss geology."`
+- consumer B (cold, empty catalog): `doc + " As a historian, discuss 19th-century America."`
+- consumer B (warm, catalog has A's publish): same prompt as cold B
+
+Qwen2.5-0.5B / 128×doc-repeats / 3080 Ti:
+
+| consumer B path | gen time | output token |
+|-----------------|---------:|-------------:|
+| cold (miss)     |   143 ms |          220 |
+| warm (prefix hit: 1920/1933 tokens matched) | **55 ms** |  220 |
+
+**Speedup: 2.61× on consumer B**, and correctness preserved (warm
+output token = cold output token). The scheduler log confirms the
+shorter-prefix match: `"cache HIT for request 0-aa73558a (1920 of
+1933 tokens matched)"`.
+
+This closes the loop from the paper's motivating scenario: cross-process
+vLLM KV sharing where prompts share a prefix but not the entire prompt.
+The connector's multi-boundary publishing makes this a one-shot lookup,
+not a fallback-and-retry dance.
+
 Multi-worker vLLM on one 12 GB GPU is memory-tight — each Qwen2.5-1.5B
 instance wants ~4–5 GB (weights + CUDA graphs + KV). Running 2+ vLLM
 workers on one GPU requires careful `--vllm-gpu-mem` tuning or a bigger
