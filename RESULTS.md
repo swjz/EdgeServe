@@ -4,6 +4,54 @@ All numbers on an NVIDIA RTX 3080 Ti (12 GB) running torch 2.10 +
 vLLM 0.19 + Apache Pulsar 3.1 in Docker. Every experiment is fully
 reproducible; scripts are under `scripts/` and `tests/`.
 
+## Benchmark honesty audit
+
+The user asked me to verify the vLLM and SGLang numbers before
+investing more in transport work. What I found:
+
+**vLLM numbers: mostly honest, with one headline caveat and one bug.**
+
+- The **same-prompt two-stage, concurrent, and prefix-share demos** are
+  clean. Seeder and consumer(s) are fresh vLLM subprocesses with
+  `enable_prefix_caching=False` and the connector as the only cache.
+  Seeder does full prefill with no cache to load; consumer loads from
+  seeder's publish. The reported speedups (2.15–3.30× single, 2.70×
+  at 3 concurrent workers, 2.61× for prefix-share) are fair.
+
+- The **multi-agent demo had a bug**: the "cold baseline" loop shared
+  one topic across consumers. Consumer 1's publish included multi-boundary
+  prefix hashes covering the shared document; consumers 2..N then
+  accidentally hit those prefix entries as "cold" runs. Fixed to use a
+  unique topic per cold consumer — the honest speedup at 5 consumers /
+  0.5B / 128-repeat-doc drops from the originally-reported 3.09× to
+  **2.46×**. (The seeder-vs-warm number is still valid and was always
+  the safer metric: ~2.41×.)
+
+- The **vLLM vs HF comparison table** in "Single-process engine ceiling"
+  conflates three speedup sources (prefix cache + FA2 kernels + continuous
+  batching); the 14–49× is NOT a clean "prefix cache alone" number.
+  Fixed with a clear disclaimer at the top of that table. For an
+  isolated prefix-cache-only measurement, see the "Ceiling comparison:
+  vLLM internal vs EdgeServeKVConnector" section below, which shows
+  the honest ~2.2–6.9× cache-only effect depending on doc size.
+
+- The **`probe_vllm_internal_vs_connector.py`** comparison is fully
+  clean: same prompt run twice on ONE vLLM instance, swap between
+  `enable_prefix_caching=True` (internal only) and the connector.
+  Shows our cross-process overhead is +6 ms at 5k tokens, +55 ms at 20k.
+
+**SGLang: no real numbers ran during this session.**
+
+- SGLang 0.5.x wheels ship with precompiled `sgl_kernel` targeted at
+  SM100 (Hopper) and ABI-bound to an older torch. Both are incompatible
+  with this machine (SM86 / torch 2.10).
+- Source compilation of `sgl_kernel` fails without `libnuma-dev` +
+  `libibverbs-dev` (needed by the mscclpp submodule). You just
+  installed them — we're rebuilding now.
+- The `bench_engines.py sglang-radix` path is scaffolded but has
+  never successfully produced a timing. Do NOT treat SGLang numbers in
+  this document as measured (there are none).
+
 ## What this proves
 
 Semantic Cache Routing through EdgeServeKVConnector **works end-to-end
