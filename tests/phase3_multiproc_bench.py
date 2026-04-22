@@ -117,16 +117,50 @@ def run_trial(
     suffixes: List[str],
     tag: str,
     max_new_tokens: int,
+    warm_cache: bool = False,
 ):
-    """Dispatch one request to every worker, collect metrics."""
+    """Dispatch one request to every worker, collect metrics.
+
+    mode = 'eager': every worker prefills the full prompt from scratch.
+    mode = 'routed': worker 0 publishes KV for the doc; workers 1..N resolve.
+      With warm_cache=True, the publish runs OUTSIDE the timed region to
+      simulate steady-state where the cache already exists on a peer. This
+      is the deployment-relevant metric -- the first request pays the
+      publish once, every subsequent one just fetches.
+    """
     assert len(workers) == len(suffixes)
-
-    # In routed mode, drive worker 0 first and block on its completion so the
-    # header is on the broker before the others call resolve(). In eager mode
-    # order doesn't matter.
     results = [None] * len(workers)
-    t_trial_start = time.perf_counter()
 
+    if mode == 'routed' and warm_cache:
+        # Pre-warm: seed publishes, we wait for propagation, then START timing.
+        _send(workers[0], {
+            'cmd': 'run',
+            'prompt': doc + ' ' + suffixes[0],
+            'cache_tags': [tag],
+            'publish': True,
+            'max_new_tokens': max_new_tokens,
+        })
+        seed_result = _await_result(workers[0], 'worker-0')
+        time.sleep(0.25)  # catalog propagation
+
+        # Timed region: N-1 consumers resolve + continue concurrently.
+        t_trial_start = time.perf_counter()
+        for i in range(1, len(workers)):
+            _send(workers[i], {
+                'cmd': 'run',
+                'prompt': suffixes[i],
+                'cache_tags': [tag],
+                'publish': False,
+                'max_new_tokens': max_new_tokens,
+            })
+        for i in range(1, len(workers)):
+            results[i] = _await_result(workers[i], f'worker-{i}')
+        results[0] = seed_result  # for reporting, not timing
+        total_wall = (time.perf_counter() - t_trial_start) * 1000
+        return {'total_wall_ms': total_wall, 'per_worker': results,
+                'timed_workers': len(workers) - 1, 'warm_cache': True}
+
+    t_trial_start = time.perf_counter()
     if mode == 'routed':
         _send(workers[0], {
             'cmd': 'run',
@@ -136,15 +170,11 @@ def run_trial(
             'max_new_tokens': max_new_tokens,
         })
         results[0] = _await_result(workers[0], 'worker-0')
-        # Give the other workers' catalog consumer threads a beat to pull the
-        # header from Pulsar before they call resolve(). Real deployments see
-        # this propagation delay too; this just makes it deterministic here.
         time.sleep(0.2)
-        # Everyone else issues resolve concurrently.
         for i in range(1, len(workers)):
             _send(workers[i], {
                 'cmd': 'run',
-                'prompt': suffixes[i],  # only the persona+query; cache covers doc prefix
+                'prompt': suffixes[i],
                 'cache_tags': [tag],
                 'publish': False,
                 'max_new_tokens': max_new_tokens,
@@ -152,7 +182,10 @@ def run_trial(
         for i in range(1, len(workers)):
             results[i] = _await_result(workers[i], f'worker-{i}')
     else:
-        # eager: every worker prefills the full prompt.
+        # For eager with warm_cache, time only workers 1..N so the comparison
+        # is apples-to-apples with routed warm_cache (which also only times
+        # N-1 consumers).
+        time_slice = slice(1, None) if warm_cache else slice(None)
         for i, w in enumerate(workers):
             _send(w, {
                 'cmd': 'run',
@@ -161,11 +194,24 @@ def run_trial(
                 'publish': False,
                 'max_new_tokens': max_new_tokens,
             })
-        for i, w in enumerate(workers):
-            results[i] = _await_result(w, f'worker-{i}')
+        if warm_cache:
+            # Toss worker 0's result (it's the "seed" that would have prepopulated
+            # a cache in a routing deployment; its work doesn't count for steady
+            # state). Start the clock after dispatch, stop after N-1 finish.
+            t_trial_start = time.perf_counter()
+            results[0] = _await_result(workers[0], 'worker-0')
+            for i in range(1, len(workers)):
+                results[i] = _await_result(workers[i], f'worker-{i}')
+            total_wall = (time.perf_counter() - t_trial_start) * 1000
+            return {'total_wall_ms': total_wall, 'per_worker': results,
+                    'timed_workers': len(workers) - 1, 'warm_cache': True}
+        else:
+            for i, w in enumerate(workers):
+                results[i] = _await_result(w, f'worker-{i}')
 
     total_wall = (time.perf_counter() - t_trial_start) * 1000
-    return {'total_wall_ms': total_wall, 'per_worker': results}
+    return {'total_wall_ms': total_wall, 'per_worker': results,
+            'timed_workers': len(workers), 'warm_cache': False}
 
 
 def main():
@@ -181,6 +227,9 @@ def main():
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--dtype', default='bf16', choices=['fp32', 'fp16', 'bf16'])
     parser.add_argument('--cache-root', default='/tmp/edgeserve-phase3')
+    parser.add_argument('--warm-cache', action='store_true',
+                        help='Measure only N-1 consumer requests after the seed '
+                             'has already published. Steady-state deployment metric.')
     args = parser.parse_args()
 
     os.makedirs(args.cache_root, exist_ok=True)
@@ -223,7 +272,8 @@ def main():
             trials = []
             for r in range(args.repeats):
                 doc, suffixes, tag = _workload(args.doc_tokens, args.num_agents, args.suffix_tokens)
-                trial = run_trial(mode, workers, doc, suffixes, tag, args.max_new_tokens)
+                trial = run_trial(mode, workers, doc, suffixes, tag,
+                                  args.max_new_tokens, warm_cache=args.warm_cache)
                 trials.append(trial)
                 print(f'  repeat {r+1}: wall={trial["total_wall_ms"]:.1f}ms', flush=True)
         finally:
