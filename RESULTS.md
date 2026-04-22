@@ -40,17 +40,41 @@ investing more in transport work. What I found:
   `enable_prefix_caching=True` (internal only) and the connector.
   Shows our cross-process overhead is +6 ms at 5k tokens, +55 ms at 20k.
 
-**SGLang: no real numbers ran during this session.**
+**SGLang: no real numbers produced — genuinely blocked on this GPU.**
 
-- SGLang 0.5.x wheels ship with precompiled `sgl_kernel` targeted at
-  SM100 (Hopper) and ABI-bound to an older torch. Both are incompatible
-  with this machine (SM86 / torch 2.10).
-- Source compilation of `sgl_kernel` fails without `libnuma-dev` +
-  `libibverbs-dev` (needed by the mscclpp submodule). You just
-  installed them — we're rebuilding now.
-- The `bench_engines.py sglang-radix` path is scaffolded but has
-  never successfully produced a timing. Do NOT treat SGLang numbers in
-  this document as measured (there are none).
+We tried hard:
+
+1. Precompiled `sgl_kernel` wheels target SM100 (Hopper) only and are
+   ABI-bound to older torch — neither works on SM86 + torch 2.10.
+2. `sglang[all]` has no PyPI source distribution — can't `pip install
+   --no-binary`. Cloned `sgl-kernel/` from the `v0.5.9` tag instead.
+3. Source build needs `libnuma-dev` + `libibverbs-dev` (user installed
+   via sudo apt).
+4. Source build needs CMake < 4 (user-side cmake 4.3 vs dlpack
+   submodule's `cmake_minimum_required` incompatibility); downgraded
+   to 3.31.
+5. Even with all the above + gcc 10 + nvcc 12.4 + `TORCH_CUDA_ARCH_LIST=
+   "8.0;8.6;8.9"`, sgl-kernel v0.5.9 `csrc/` contains files
+   (`es_sm100_mxfp8_blockscaled_group_quant.{cu,cuh}`,
+   `nvfp4_quant_kernels.cu`, `nvfp4_expert_quant.cu`) that use
+   CUDA 12.8-only intrinsics (`__nv_fp8_e8m0`, `cuda::ptx::cp_async_bulk*`).
+   Stripped those from `CMakeLists.txt`.
+6. Rebuild then fails in the next batch of .cu files (activation.cu,
+   fused_add_rms_norm_kernel.cu, rope.cu, pos_enc.cu, etc). Detailed
+   error messages got truncated — but the pattern is clear: sgl-kernel
+   0.5.x is tightly bound to CUDA 12.8+.
+
+**Unblocking path requires one of:**
+- Upgrade nvcc to 12.8+ on the GPU box (`sudo apt install cuda-toolkit-12-8`
+  or the .run installer), OR
+- Pin sgl-kernel to a pre-CUDA-12.8 version that compiles cleanly on
+  12.4 (probably 0.3.x era, but sglang-proper ≥0.5 needs 0.5-era
+  kernels, creating a version-pin rabbit hole), OR
+- Rent a Hopper GPU (H100) where the SM100 wheels work.
+
+The `bench_engines.py sglang-radix` path is scaffolded and invocable
+on a machine with a working sgl-kernel. **Do NOT treat SGLang numbers
+in this document as measured — there are none.**
 
 ## What this proves
 
