@@ -76,3 +76,43 @@ def test_abstract_interface_covered():
     for name in KVConnectorBase_V1.__abstractmethods__:
         assert name not in EdgeServeKVConnector.__abstractmethods__, \
             f'abstract method {name!r} is not implemented on EdgeServeKVConnector'
+
+
+def test_slice_first_n_tokens_handles_flash_and_triton_layouts():
+    """_slice_first_n_tokens has to dispatch on whether the saved tensor
+    uses Flash (axis 1 is tokens) or anything else (axis 0 is tokens)."""
+    import torch
+    from edgeserve.inference.vllm_kv_connector import _slice_first_n_tokens
+    # Flash-style: (2, L, hidden)
+    flash = torch.arange(2 * 10 * 4).reshape(2, 10, 4)
+    sliced = _slice_first_n_tokens(flash, 3, None)
+    assert sliced.shape == (2, 3, 4)
+    # MLA / Triton-style: (L, hidden) or (L, heads, dim)
+    mla = torch.arange(10 * 8).reshape(10, 8)
+    sliced = _slice_first_n_tokens(mla, 3, None)
+    assert sliced.shape == (3, 8)
+    triton = torch.arange(10 * 4 * 8).reshape(10, 4, 8)
+    sliced = _slice_first_n_tokens(triton, 3, None)
+    assert sliced.shape == (3, 4, 8)
+
+
+def test_multi_boundary_hashes_produces_every_block_boundary():
+    """Publisher's wait_for_save emits entity tags at every block boundary
+    so a consumer with a shorter prefix still finds the entry."""
+    from edgeserve.inference.vllm_kv_connector import (
+        EdgeServeKVConnector, _hash_token_ids,
+    )
+    # Make a bogus connector instance just to reach _Worker (we only need
+    # the `_multi_boundary_hashes` method; inline a minimal worker.)
+    from edgeserve.inference.vllm_kv_connector import _Worker
+    class FakeClient:
+        pass
+    worker = object.__new__(_Worker)
+    worker._block_size = 4
+    tokens = list(range(10))  # 10 tokens; block_size 4 -> boundaries at 4, 8
+    entities = worker._multi_boundary_hashes(tokens, _hash_token_ids(tokens))
+    # full hash + boundary at 4 + boundary at 8 = 3 entities
+    assert _hash_token_ids(tokens) in entities
+    assert _hash_token_ids(tokens[:4]) in entities
+    assert _hash_token_ids(tokens[:8]) in entities
+    assert len(entities) == 3
