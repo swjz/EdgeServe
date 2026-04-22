@@ -88,6 +88,16 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+# Ensure INFO-level diagnostics land in vLLM's subprocess logs. Without this,
+# our logger only emits at WARNING by default.
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter(
+        '[edgeserve_kv %(levelname)s] %(message)s'
+    ))
+    logger.addHandler(_h)
+    logger.propagate = False
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +274,7 @@ class _Scheduler:
     ) -> KVConnectorMetadata:
         meta = EdgeServeKVMetadata()
         total_load = 0
+        total_store = 0
 
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = list(new_req.prompt_token_ids or [])
@@ -300,6 +311,7 @@ class _Scheduler:
                         slot_mapping=slot,
                         is_store=True,
                     ))
+                    total_store += 1
 
         # Handle preempt-resumed requests (see ExampleConnector.build_connector_meta).
         cached = getattr(scheduler_output, 'scheduled_cached_reqs', None)
@@ -331,6 +343,9 @@ class _Scheduler:
 
         self._requests_need_load.clear()
         self._hash_cache.clear()
+        if total_load or total_store:
+            logger.info('EdgeServe build_connector_meta: load=%d store=%d',
+                        total_load, total_store)
         return meta
 
     def request_finished(
@@ -424,15 +439,25 @@ class _Worker:
         attn_metadata: "AttentionMetadata", **kwargs: Any,
     ) -> None:
         if self._connector_metadata is None:
+            logger.debug('EdgeServe save_kv_layer: no metadata bound; skip %s',
+                         layer_name)
             return
-        for req in self._connector_metadata.requests:
-            if not req.is_store:
-                continue
+        store_reqs = [r for r in self._connector_metadata.requests if r.is_store]
+        if not store_reqs:
+            return
+        logger.info('EdgeServe save_kv_layer: %s <- %d store requests',
+                    layer_name, len(store_reqs))
+        for req in store_reqs:
             layer_attn = attn_metadata.get(layer_name) \
                 if isinstance(attn_metadata, dict) else attn_metadata
-            kv_slice = _extract_kv_from_layer(
-                kv_layer, req.slot_mapping, layer_attn, self._block_size,
-            )
+            try:
+                kv_slice = _extract_kv_from_layer(
+                    kv_layer, req.slot_mapping, layer_attn, self._block_size,
+                )
+            except Exception as e:
+                logger.exception('EdgeServe extract_kv failed on %s: %s',
+                                 layer_name, e)
+                continue
             self._pending_saves.setdefault(req.request_hash, {})[layer_name] = \
                 kv_slice.detach().cpu().contiguous()
 
