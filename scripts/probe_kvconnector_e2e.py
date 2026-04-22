@@ -30,8 +30,13 @@ def main():
     parser.add_argument('--max-model-len', type=int, default=2048)
     parser.add_argument('--doc', default='The city of Chicago is on Lake Michigan. ' * 16)
     parser.add_argument('--pulsar-url', default='pulsar://localhost:6650')
-    parser.add_argument('--topic', default='kvcache-headers-probe')
+    parser.add_argument('--topic', default=None,
+                        help='default: kvcache-headers-probe-<timestamp>')
     args = parser.parse_args()
+
+    if args.topic is None:
+        args.topic = f'kvcache-headers-probe-{int(time.time()*1000)}'
+    print(f'topic = {args.topic}')
 
     os.environ.setdefault('VLLM_USE_V1', '1')
 
