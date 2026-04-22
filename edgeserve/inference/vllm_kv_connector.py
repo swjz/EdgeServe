@@ -468,23 +468,48 @@ class _Worker:
 # ---------------------------------------------------------------------------
 # Backend client.
 
+# Process-wide cache. vLLM instantiates the connector TWICE (SCHEDULER role
+# + WORKER role) per engine. Both need to talk to the same SemanticCacheClient
+# -- and Pulsar subscriptions are Exclusive, so creating two clients with the
+# same node_id conflicts on the catalog subscription. Share the instance.
+_BACKEND_CACHE: dict[tuple, "EdgeServeBackendClient"] = {}
+
+
 class EdgeServeBackendClient:
-    def __init__(self, extra_config: dict) -> None:
-        from edgeserve.semantic_cache import SemanticCacheClient
-        self.client = SemanticCacheClient(
-            pulsar_node=extra_config.get('pulsar_url', 'pulsar://localhost:6650'),
-            node_id=extra_config.get('node_id', 'vllm-rank-0'),
-            local_cache_path=extra_config.get('local_cache_path', '/tmp/edgeserve-kv'),
-            http_port=int(extra_config.get('http_port', 0)),
-            http_host=extra_config.get('http_host', '0.0.0.0'),
-            topic=extra_config.get('topic', 'kvcache-headers'),
-        )
+    def __init__(self, client) -> None:
+        self.client = client
+        self._close_me = False
 
     def close(self) -> None:
+        if not self._close_me:
+            return
         try:
             self.client.close()
         except Exception:
             pass
+
+    @classmethod
+    def get_or_create(cls, extra_config: dict) -> "EdgeServeBackendClient":
+        key = (
+            extra_config.get('pulsar_url', 'pulsar://localhost:6650'),
+            extra_config.get('topic', 'kvcache-headers'),
+            extra_config.get('node_id', 'vllm-rank-0'),
+        )
+        if key in _BACKEND_CACHE:
+            return _BACKEND_CACHE[key]
+        from edgeserve.semantic_cache import SemanticCacheClient
+        sc = SemanticCacheClient(
+            pulsar_node=key[0],
+            node_id=key[2],
+            local_cache_path=extra_config.get('local_cache_path', '/tmp/edgeserve-kv'),
+            http_port=int(extra_config.get('http_port', 0)),
+            http_host=extra_config.get('http_host', '0.0.0.0'),
+            topic=key[1],
+        )
+        handle = cls(sc)
+        handle._close_me = True
+        _BACKEND_CACHE[key] = handle
+        return handle
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +536,7 @@ class EdgeServeKVConnector(KVConnectorBase_V1):
                 )
             block_size = vllm_config.cache_config.block_size
 
-        self._client = EdgeServeBackendClient(extra_config)
+        self._client = EdgeServeBackendClient.get_or_create(extra_config)
         self._scheduler: Optional[_Scheduler] = None
         self._worker: Optional[_Worker] = None
 
