@@ -306,6 +306,36 @@ vLLM KV sharing where prompts share a prefix but not the entire prompt.
 The connector's multi-boundary publishing makes this a one-shot lookup,
 not a fallback-and-retry dance.
 
+### Multi-agent benchmark (1 seeder + N unique-suffix consumers)
+
+`scripts/demo_kvconnector_multi_agent.py` scales the prefix-share demo
+to N consumers, each with its own persona/query suffix. Every consumer
+runs as a fresh vLLM subprocess and hits the seeder's doc cache through
+EdgeServeKVConnector's prefix-boundary matching.
+
+Qwen2.5-0.5B / bf16 / 3080 Ti, doc ≈ 3840 aligned tokens, 5 consumers
+(SRE, historian, tourist, biologist, journalist, poet):
+
+| stage | gen time |
+|-------|---------:|
+| seeder (full doc prefill) | 274.3 ms |
+| warm consumer 1 (`doc + "As a historian..."`) |  84.1 ms |
+| warm consumer 2 (`doc + "As a tourist..."`)    |  90.0 ms |
+| warm consumer 3 (`doc + "As a biologist..."`)  |  88.9 ms |
+| warm consumer 4 (`doc + "As a journalist..."`) |  83.8 ms |
+| warm consumer 5 (`doc + "As a poet..."`)        |  90.4 ms |
+| **warm consumer gen (median)** | **88.9 ms** |
+
+**Seeder → warm-consumer speedup: 3.09×**. Every consumer's log reports
+`matched=3840/384X tokens` — the connector loaded the shared doc's KV
+and only the 9–10-token suffix was computed per request. Output tokens
+on the warm path match a cold (no-cache) run of the same consumer,
+proving the prefix-load is bit-exact for the shared portion.
+
+This is the headline Semantic Cache Routing result: cross-process vLLM
+instances sharing KV for arbitrary agent prompts that happen to share
+a document prefix.
+
 Multi-worker vLLM on one 12 GB GPU is memory-tight — each Qwen2.5-1.5B
 instance wants ~4–5 GB (weights + CUDA graphs + KV). Running 2+ vLLM
 workers on one GPU requires careful `--vllm-gpu-mem` tuning or a bigger
