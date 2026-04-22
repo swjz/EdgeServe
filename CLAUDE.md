@@ -147,3 +147,28 @@ python scripts/demo_kvconnector_concurrent.py \
 The main branch is `pulsar` (not `master`/`main`). Target PRs at `pulsar`.
 The `llm` branch holds all Semantic Cache Routing work and diverges
 significantly from `pulsar`; rebase carefully.
+
+## Running Claude Code on the GPU box (migration)
+
+If you want to run Claude Code directly on `swjz-ubuntu` instead of ssh'ing
+from Mac:
+
+1. Install Claude Code on Ubuntu:
+   `npm install -g @anthropic-ai/claude-code` (needs Node 18+)
+2. The repo is already at `~/edgeserve-llm` on swjz-ubuntu.
+3. Copy permissions: `scp` the Mac's
+   `~/Dropbox/coding/edgeserve-llm/.claude/settings.local.json` to
+   `~/edgeserve-llm/.claude/settings.local.json` on Ubuntu.
+4. Copy auto-memory: `scp -r` the Mac's
+   `~/.claude/projects/-Users-swjz-Dropbox-coding-edgeserve-llm/memory/`
+   to `~/.claude/projects/-home-swjz-edgeserve-llm/memory/` on Ubuntu
+   (Claude Code derives the path from `cwd`; starting from
+   `~/edgeserve-llm` on Ubuntu gives that slug).
+5. `cd ~/edgeserve-llm && claude-code` — opens a fresh session. Point it
+   at `SESSION_SUMMARY.md` + `RESULTS.md` + this file to rebuild context
+   in under 30 seconds.
+
+The in-flight conversation context does NOT migrate — the session files
+under `~/.claude/projects/*/sessions/` are per-machine. Lost history is
+typically fine since the repo itself carries the durable state via
+commits + markdown summaries.
