@@ -1,122 +1,307 @@
-# Pending work — for the remote session to pick up
+# TODO — KV-Cache CDN build-out
 
-Task IDs (#24, #28, …) reference Claude Code's TaskList. On the remote
-machine those IDs won't match — just read these entries and create
-equivalents via the TaskCreate tool.
+Reorganized around the thesis in `DESIGN.md` (KV-cache CDN for edge
+LLM serving, EdgeServe-v2). Read `DESIGN.md` first.
 
-Prioritized:
+Claude Code TaskList IDs on the Mac side are listed for cross-reference
+(e.g. `[#24]`) but won't map to the remote's TaskList — just use these
+sections to create equivalent tasks via TaskCreate on the remote.
 
-## #29 — Quick-win: "prefix-bloom vs semantic-bloom" honesty note
+Phase ordering is important:
+- **Phase 1** (entity-keyed discovery) closes the one big mechanism
+  gap — today the bloom carries prefix hashes, the thesis needs
+  semantic entities. Until this lands, the implementation doesn't match
+  the design and the headline "permuted context hit" scenario can't be
+  demonstrated.
+- **Phase 2** (LAN measurement) is the paper's money graph. Blocked on
+  nothing code-wise; can run in parallel with Phase 1, but the numbers
+  are more compelling after entity discovery works.
+- **Phases 3-5** are the production-shape story: tiered storage,
+  context push, zero-copy transports. Do them in order.
 
-~15 min, docs only.
+---
 
-RESULTS.md today claims "Semantic Cache Routing" but the bloom filter
-actually encodes block-aligned prefix HASHES, not semantic entity
-tags. Add a short paragraph under "Benchmark honesty audit"
-distinguishing:
+## Phase 1 — Entity-keyed discovery
 
-- **Paper describes:** bloom filter encoding semantic tags (doc IDs,
-  function names) that lets permuted contexts hit.
-- **We shipped:** bloom filter encoding block-aligned prefix hashes,
-  efficient for catalog lookup across many prefix boundaries of the
-  same token sequence.
-- **Consequence:** our impl hits on shared-prefix prompts; does NOT
-  hit on permuted-prefix prompts (persona-before-doc). That's the one
-  remaining honesty gap after the audit.
+Goal: replace the prefix-hash bloom with a semantic-entity bloom
+(prefix-hash retained as fallback), close the gap between what
+RESULTS.md claims and what the code does.
 
-No code change. Do this first even if #24–#27 get punted.
+### 1.1 — Honesty note in RESULTS.md `[#29, quick-win]`
 
-## #24 — A1: publisher accepts user-declared semantic entity tags
+~15 min, docs only. Before any code change, add a paragraph to
+`RESULTS.md` under "Benchmark honesty audit" distinguishing:
 
-Extend the vLLM KVConnector publish path so each request can carry
-extra semantic tags (doc IDs, function names, entity strings)
-alongside the existing block-aligned prefix hashes. Concretely:
+- what the paper/DESIGN.md describes: bloom filter encoding semantic
+  entity tags
+- what's shipped in code today: bloom filter encoding block-aligned
+  prefix hashes
+- consequence: current speedups only apply to shared-token-prefix
+  workloads (doc-first), not to permuted-context workloads (persona-
+  first)
 
-- Plumb a way for the caller to attach entities to a request: a kwarg
-  on `vllm.LLM.generate()` won't work cleanly — vLLM doesn't forward
-  arbitrary metadata. Options: (a) read from `request.metadata` if
-  vLLM exposes one, (b) a request-id → entities side-channel
-  populated out-of-band before `generate`, (c) extend
-  `EdgeServeKVConnector`'s `extra_config` to accept a callback that
-  extracts entities from `request.prompt_token_ids`.
-- Recommend (c): callback signature
-  `entities_fn(token_ids: list[int]) -> set[str]`, registered once at
-  connector init. For agent systems the user already has the
-  entities; this just lets them hand them to us.
-- In `_Worker.wait_for_save`, include those user entities in the bloom
-  filter on top of the prefix-hash entities already there.
-- Update `KV_CONNECTOR.md` to document the API.
-- Do NOT change the lookup path in this task; A1 only changes what
-  gets published.
+Do this first. Makes the repo internally consistent regardless of
+whether Phase 1 completes.
 
-## #25 — A2: scheduler entity-intersection lookup
+### 1.2 — Publisher accepts entity tags `[#24]`
 
-After #24. Add an entity-intersection path to
-`_Scheduler.get_num_new_matched_tokens`. When the request has
-declared entities (per #24), try `SemanticCacheClient.catalog.lookup(
-{entities})` BEFORE the prefix-hash fallback. On hit, figure out how
-many tokens the hit header's KV actually covers (store covered-length
-in the `CacheHeader` so the consumer knows how many tokens to
-scatter). On miss, fall back to the existing prefix-boundary longest-
-match logic. Coexists with #24's publish path.
+Extend the vLLM KVConnector publish path so each request can attach
+user-declared entity tags to the bloom filter alongside the existing
+prefix hashes.
 
-## #26 — A3: permuted-persona demo + correctness test (blocked on #24, #25)
+**API proposal:** add `entities_fn` to `EdgeServeKVConnector`'s
+`kv_connector_extra_config`:
 
-Write a demo that exercises the paper's motivating scenario:
+```python
+kv_connector_extra_config={
+    ...
+    'entities_fn_module_path': 'myapp.kv_entities',
+    'entities_fn_name': 'extract_entities',
+}
+```
 
-- Seeder runs `"Persona A: Reply as scientist. " + doc`
-- Consumer runs `"Persona B: Reply as historian. " + doc` (DIFFERENT
-  first tokens)
+where `extract_entities(prompt_token_ids) -> set[str]` returns the
+semantic tags for the prompt. Alternative if we find a way:
+`request.metadata` field on vLLM.
 
-Before #24/#25 this misses — no shared prefix. After #24/#25, both
-sides declare the same `doc_id` entity, and consumer hits via entity
-match rather than prefix.
+**Implementation touches:**
+- `edgeserve/inference/vllm_kv_connector.py` — plumb the fn through
+  `_Worker` and call it in `save_kv_layer` /  `wait_for_save` to populate
+  entities alongside `_hash_token_ids(...)`.
+- `edgeserve/semantic_cache/bloom.py` — already supports arbitrary
+  entity strings. No change.
+- `KV_CONNECTOR.md` — document the API.
+
+**Do NOT** modify the lookup path in this task. This task strictly
+changes what gets published. Scheduler still uses prefix-hash matching.
+
+### 1.3 — Scheduler entity-intersection lookup `[#25]`
+
+After 1.2. Add an entity-based lookup path to
+`_Scheduler.get_num_new_matched_tokens`.
+
+**Flow on new request:**
+1. If the request has declared entities (from the same `entities_fn`
+   supplied at publish time), call
+   `SemanticCacheClient.catalog.lookup(entities)`.
+2. On positive hit, look up the header to determine how many tokens
+   the cached KV covers (`header.covered_tokens` — new field on
+   `CacheHeader`, populated at publish time).
+3. If covered_tokens ≥ consumer's aligned prompt length, return
+   `(covered_tokens - num_computed_tokens, False)` and flag the
+   request as load path.
+4. If not, or if no entity match, fall back to current prefix-hash
+   longest-match logic.
+
+**New field on CacheHeader:**
+`covered_tokens: int` — number of tokens in the cached KV block.
+Required because with entity lookup the consumer no longer
+reconstructs the publisher's token sequence.
+
+### 1.4 — Permuted-persona demo + correctness `[#26]`
+
+Blocks on 1.2 + 1.3.
+
+Write `scripts/demo_kvconnector_permuted.py`:
+- Seeder prompt: `"Persona A: Reply as scientist. " + doc + " Summarize."`
+- Consumer prompt: `"Persona B: Reply as historian. " + doc + " Summarize."`
+- Both declare entity `{doc_id}` via `entities_fn`.
+
+Verify:
+- Consumer gets a cache HIT via entity match (not prefix — first
+  tokens differ).
+- Consumer's next-token id equals a cold no-cache run of the same
+  consumer prompt.
+- Speedup vs cold reported.
+
+Add row to `RESULTS.md` headline TL;DR table.
+
+### 1.5 — Rewrite RESULTS framing `[#27]`
+
+Blocks on 1.4.
+
+Replace the "prefix-bloom vs semantic-bloom" honesty note (from 1.1)
+with a proper "Semantic entity discovery" section that includes the
+permuted-persona numbers. Prefix-hash path remains documented as the
+fallback for consumers without entity metadata.
+
+---
+
+## Phase 2 — LAN CDN measurements
+
+Goal: the paper's headline figure. Prove the architecture pays for
+real over LAN.
+
+### 2.1 — Two-host deployment on home LAN `[#28]`
+
+Mac Mini + 3080 Ti. Run the two-stage demo across them.
+
+Concrete steps:
+- Pulsar broker on one host (probably GPU box — easier Docker).
+- Seeder = GPU box running vLLM.
+- Consumer = Mac Mini running... something. Options:
+  - vLLM on Mac CPU (available but slow; might not be worth it)
+  - HFEngine on Mac (works, but non-production)
+  - Just the "resolve + safetensors load + scatter" part, no actual
+    inference, to isolate the transport measurement
+- Ensure `CacheHeader.hostname` triggers the HTTP path, not
+  `local_path` (the file system paths differ across hosts).
 
 Deliverables:
-- `scripts/demo_kvconnector_permuted.py`
-- Verify: consumer's next-token id under warm cache equals the cold
-  no-cache baseline of the SAME permuted prompt (correctness).
-- Speedup number in RESULTS.md headline table.
+- `scripts/demo_kvconnector_lan.py`
+- LAN HTTP fetch wall-time for 50-1000 MB blobs (ballpark bandwidth
+  under real conditions, not synthetic iperf).
+- End-to-end edge-decode wall-time.
 
-## #27 — A4: update RESULTS.md framing (blocked on #26)
+### 2.2 — Bandwidth-vs-recompute crossover benchmark
 
-After #24–#26 land, rewrite the relevant RESULTS.md sections:
+The paper's money figure. Pick 3 models (0.5B, 1.5B, 7B if it fits),
+3-4 context lengths (1k, 4k, 16k, 50k tokens), plot:
 
-- Add permuted-persona numbers to the headline TL;DR table.
-- Explain: prefix-hash path still works for same-prefix workloads;
-  entity path handles permuted contexts that prefix-hash can't; both
-  can be active simultaneously (multi-tier bloom lookup).
-- Retire the "prefix-bloom vs semantic-bloom" note from #29 now that
-  the gap is closed.
+- x-axis: effective link bandwidth (simulate with `tc qdisc` or
+  `iproute2` netem; sweep 100 Mbps, 500 Mbps, 1 Gbps, local)
+- y-axis: wall-time
+- two curves per model×context: "edge prefill locally" vs "pull KV
+  over link"
 
-## #28 — B: Cross-host LAN validation
+Output: publication-quality crossover plot showing the regime where
+the architecture wins. Deliverable:
+`scripts/bench_bandwidth_crossover.py` + `docs/bandwidth_crossover.png`
+(if we allow non-gitignored image) or numbers table in RESULTS.md.
 
-Independent of A. Run the two-stage demo across two physical
-machines on the home LAN:
+### 2.3 — Update RESULTS.md "Cross-host" section
 
-- Seeder: 3080 Ti (vLLM). Consumer: Mac Mini (CPU or MPS) OR another
-  Linux box.
-- Both point at the SAME Pulsar broker (one of the two hosts, or a
-  third docker).
-- Consumer's `SemanticCacheClient` must talk to the seeder's HTTP
-  endpoint over LAN. Existing `CacheHeader` carries `node_uri` with
-  hostname — as long as hostnames resolve, the HTTP fallback fires
-  automatically since `_is_local_readable()` returns False across
-  hosts.
-- Measure: (a) HTTP fetch wall time on LAN for 50-200 MB KV blobs,
-  (b) end-to-end consumer gen time, (c) vs same-host mmap fast path.
-- Deliverables: `scripts/demo_kvconnector_lan.py`; numbers in
-  RESULTS.md "What this run does NOT demonstrate" section (currently
-  blank for cross-host).
+Today the section is empty (just says "we haven't tested this"). Fill
+with real numbers + the crossover plot reference.
 
-Tests the HTTP transport under realistic conditions — today's 1.54×
-number was measured by disabling the mmap fast path on one box, not
-actual LAN.
+---
 
-## #18 — CUDA IPC / RDMA transport (already pending; long-term)
+## Phase 3 — Tiered storage on the context server
 
-The overhead-reduction play. Drops the +6/+55 ms same-host overhead
-(RESULTS.md "Ceiling comparison") to near zero via CUDA IPC
-(torch.multiprocessing + shared CUDA contexts). For cross-host, RDMA
-or NCCL. Big engineering lift, modest narrative payoff — only pursue
-after A (#24–#27) and B (#28) are done.
+Goal: context server can hold far more KV than fits in GPU.
+
+### 3.1 — Design doc for eviction policy
+
+Short doc (~200 lines) covering:
+- Tier capacities (GPU / pinned CPU / NVMe)
+- Promotion rules (on hit, move up one tier)
+- Eviction rules (LRU within tier, demote on pressure, tombstone on
+  full-evict)
+- Tombstone broadcast mechanic (new `CacheHeader.deleted=True` bit?
+  Or a separate tombstone topic?)
+
+### 3.2 — L1/L2/L3 backing store
+
+- L1 = GPU paged-buffer (same as today, owned by vLLM)
+- L2 = pinned CPU tensors on the context server, mmap-able
+- L3 = NVMe file, mmap-able
+
+Write an `edgeserve/semantic_cache/tiered_store.py` that wraps the
+existing `CacheHttpServer.write_block` / read paths with tier-aware
+routing.
+
+### 3.3 — Hit promotion + miss path fill
+
+On cache hit at L2/L3, promote the entry back to L1 (if there's room)
+or stay-in-place (if not). On miss, new publish goes into L1, pushes
+existing L1 entries down.
+
+### 3.4 — Tombstone propagation
+
+On eviction below L3 (i.e. entry is gone for good), broadcast a
+tombstone header so consumers don't chase dead pointers. Add a
+`tombstones` topic or reuse the header topic with a deletion flag.
+
+### 3.5 — Benchmark tier traffic under realistic workload
+
+Cold-working-set benchmark: 100 distinct documents, Zipf-distributed
+access pattern. Measure:
+- L1 hit rate, L2 hit rate, L3 hit rate
+- Miss rate (recompute)
+- Mean latency by tier
+
+---
+
+## Phase 4 — Context-push daemon
+
+Goal: edge-side file watcher that keeps the context server's KV fresh.
+
+### 4.1 — Context ingest endpoint on context server
+
+Context server exposes `POST /ingest` with:
+- Entity tag (including content-sha)
+- The raw content (tokens, text, file bytes)
+- Model target
+
+Server tokenizes + prefills + publishes. Async; returns a job id or
+streaming progress.
+
+### 4.2 — Edge-side watcher
+
+Lightweight daemon (`edgeserve.edge.watcher`) that monitors a
+directory (e.g. `~/.edgeserve/context/`):
+- On file change, compute new content-sha
+- POST updated content to the context server with
+  `entity=codebase:{repo}/{path}@sha={new_sha}`
+- Old entity (same entity, old sha) eventually tombstones via tiered-
+  storage LRU eviction
+
+### 4.3 — Entity versioning semantics
+
+- Entity tag includes content-sha.
+- Consumer requesting `codebase:myrepo/file.py` without sha gets
+  latest-sha'd entry from catalog (most recent `created_ms`).
+- Consumer requesting `codebase:myrepo/file.py@sha=abc123` gets that
+  specific version (or miss if evicted).
+
+### 4.4 — End-to-end session demo
+
+A realistic flow:
+- User edits `file_diff_v2.py` in their editor.
+- Watcher daemon pushes to context server, which prefills + publishes.
+- User on edge runs "analyze `file_diff_v2.py`" via local inference.
+- Edge discovers the fresh entity via catalog, pulls KV, decodes
+  answer locally.
+- No user tokens ever leave the edge.
+
+Benchmark: time from file save to first-token-generated, compared to
+"no cache — edge prefills from scratch" baseline.
+
+---
+
+## Phase 5 — Zero-copy transport
+
+Defer until Phase 1-4 are done.
+
+### 5.1 — Same-host CUDA IPC `[#18, existing task]`
+
+For cases where context server and edge inference happen to share a
+machine (single-GPU dev setup, or multi-process on a beefy
+workstation), `torch.multiprocessing`-style CUDA IPC handles gives
+zero-copy transfer between processes sharing a CUDA context.
+
+Drops the current ~6-55 ms overhead to near zero for same-host hits.
+
+### 5.2 — Cross-host RDMA / NCCL
+
+For production clusters with real RDMA fabric, plumb NCCL / NIXL
+behind `SemanticCacheClient.resolve_into` so the transport is RDMA
+verbs rather than HTTP. Big engineering lift, modest narrative payoff
+for the edge-focused story — mostly a "we're not slower than existing
+in-datacenter solutions" check.
+
+---
+
+## Honesty threads to keep tracking
+
+- The current numbers in RESULTS.md are prefix-hash, doc-first
+  scenarios. Until Phase 1 lands, do NOT rephrase them as "semantic
+  routing" results.
+- Cross-host is empty. Until Phase 2.1 runs, the 1.54× "LAN number"
+  in RESULTS.md is simulated, not measured.
+- The paper's claim is CDN-for-LLM. Without tiered storage (Phase 3)
+  and context push (Phase 4), the word "CDN" is aspirational. Be
+  careful not to overclaim in writeups.
+- SGLang is genuinely blocked on CUDA 12.8+. Separate from all
+  phases above; only unblocks if the GPU box gets a toolkit upgrade
+  or we move to a Hopper box.
