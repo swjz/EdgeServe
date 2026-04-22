@@ -89,6 +89,28 @@ The LLM-specific work lives in `edgeserve/semantic_cache/` and
   used by any live benchmark today but preserved as the
   inference-operator primitive mirroring `Compute`.
 
+### Benchmark honesty notes (hard-won)
+
+- **`EdgeServeKVConnector` publishes multi-boundary prefix hashes** as
+  bloom entities. If a "cold baseline" consumer runs on the SAME topic
+  where another process has already published — even with a different
+  suffix — the consumer's prefix-boundary lookup will hit. Always use
+  a UNIQUE topic per cold-baseline subprocess, or no connector at all
+  for the cold reference. `scripts/demo_kvconnector_multi_agent.py`
+  shipped a bug like this early; fixed to allocate one cold topic per
+  consumer. See "Benchmark honesty audit" in `RESULTS.md`.
+
+- **vLLM's `llm.generate(prompts=[...])`** batches all N prompts via
+  continuous batching; comparing it to a Python for-loop on HF is NOT
+  a clean "prefix cache" isolation. For a cache-only measurement, run
+  the same prompt twice on ONE vLLM instance and compare warm vs cold
+  (see `scripts/probe_vllm_internal_vs_connector.py`).
+
+- **SGLang** as of v0.5.x requires `libnuma-dev` + `libibverbs-dev` +
+  gcc 10+ to build `sgl_kernel` from source. Wheels on PyPI ship SM100
+  binaries only and are ABI-bound to older torch; they will not load
+  on Ampere or newer-torch setups.
+
 ### Benchmarks (all under `scripts/` or `tests/`)
 
 - `scripts/demo_kvconnector_two_stage.py` — seeder + fresh consumer
