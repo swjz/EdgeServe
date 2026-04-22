@@ -1,4 +1,4 @@
-# Autonomous session summary — 2026-04-22
+# Session summary — 2026-04-22 (updated, GPU-box session)
 
 Full night of autonomous work on the `llm` branch. Headline: the
 `EdgeServeKVConnector` is now **working end-to-end with vLLM** (tasks
@@ -143,15 +143,41 @@ to a cold no-cache run of the same prompt — correctness is preserved.
   were SM100-only in the wheel and ABI-incompatible with torch 2.10).
   Documented as limitation.
 
-## Pointers for tomorrow
+## Phase 1 — Semantic entity tags (COMPLETE, 2026-04-22)
 
-- `RESULTS.md` — start here for numbers and context.
-- `scripts/demo_kvconnector_multi_agent.py` — run this to reproduce
-  the multi-agent result from scratch.
-- `edgeserve/inference/vllm_kv_connector.py` — the connector code;
-  read `wait_for_save` and `start_load_kv` for the save/load mechanics
-  and `_Scheduler.get_num_new_matched_tokens` for prefix-match logic.
-- `scripts/probe_load_profile.py` — useful if you want to attack the
-  transport overhead (it shows mmap is already 9× faster than the
-  bytes round-trip, so the next lever is CUDA IPC or direct-to-GPU
-  loading).
+Commits `6ef919f`, `8b40171`, `1d6100c` on `llm` branch close the gap
+between the paper's "semantic" framing and what was shipped:
+
+- `set_next_request_entities({"doc_id:wiki42"})` before `llm.generate()`:
+  connector encodes the tag into the bloom filter alongside prefix hashes.
+- Scheduler's entity-first lookup: `catalog.lookup({"doc_id:wiki42"})`
+  → `header.num_tokens` as coverage → direct UUID fetch.
+- `demo_kvconnector_semantic.py` exercises the 4-subprocess scenario;
+  verified **3.29× (prefix-hash) and 3.50× (entity-tag) speedup**,
+  correctness confirmed (token=15235 matches cold baseline).
+- `KV_CONNECTOR.md` and `RESULTS.md` updated with numbers and the
+  permuted-persona impossibility note (see DESIGN.md Non-goals).
+
+## New design framing
+
+See `DESIGN.md` — the project is now framed as a **KV-Cache CDN for
+edge LLM serving**. Read it before starting new work. The road map
+phases are in `TODO.md`.
+
+## Next milestones
+
+- **Phase 2**: LAN CDN measurements — Mac Mini ↔ GPU box, HTTP fetch
+  timing, bandwidth-vs-recompute crossover curve (`TODO.md §2`).
+- **sgl_kernel build**: PID 120180 building (v2, adding stub files
+  back so linker doesn't fail). When done: install, run
+  `bench_engines.py --engines sglang-radix`, add to RESULTS.md.
+
+## Pointers for next session
+
+- `DESIGN.md` — architecture thesis and economic case.
+- `TODO.md` — prioritised phase-by-phase task list.
+- `RESULTS.md` — all numbers; start with TL;DR table.
+- `scripts/demo_kvconnector_semantic.py` — Phase 1 demo (entity tags).
+- `edgeserve/inference/vllm_kv_connector.py` — connector code;
+  `set_next_request_entities`, `_Scheduler.get_num_new_matched_tokens`,
+  `_Worker.wait_for_save` are the entity-tag entry points.
