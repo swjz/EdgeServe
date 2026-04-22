@@ -47,6 +47,9 @@ def main():
 
     kv_cfg = KVTransferConfig(
         kv_connector='EdgeServeKVConnector',
+        # Let vLLM's subprocess EngineCore import the connector module
+        # directly, without needing our register() to run there.
+        kv_connector_module_path='edgeserve.inference.vllm_kv_connector',
         kv_role='kv_both',
         kv_connector_extra_config={
             'pulsar_url': args.pulsar_url,
