@@ -151,6 +151,22 @@ def _slot_mapping_from_blocks(
 # ---------------------------------------------------------------------------
 # Tensor gather/scatter helpers, lifted from ExampleConnector and adapted.
 
+def _slice_first_n_tokens(
+    tensor: torch.Tensor, n: int, attn_metadata: Any,
+) -> torch.Tensor:
+    """Slice the first N tokens from a saved KV tensor. Axis depends on the
+    attention backend that saved the tensor (see `_extract_kv_from_layer`):
+    Flash has token axis = 1, others axis = 0.
+
+    We detect Flash by dim count + leading dim == 2 to avoid importing the
+    backend classes in the hot path; cheap enough.
+    """
+    if tensor.dim() == 3 and tensor.shape[0] == 2:
+        # Flash-style (2, tokens, hidden)
+        return tensor[:, :n]
+    return tensor[:n]
+
+
 def _extract_kv_from_layer(
     layer: torch.Tensor,
     slot_mapping: torch.Tensor,
@@ -230,6 +246,11 @@ class _Scheduler:
         self._block_size = block_size
         # request_id -> Request (we've decided to load external KV on this req)
         self._requests_need_load: dict[str, Any] = {}
+        # request_id -> matched prefix length (in tokens) from the last
+        # get_num_new_matched_tokens call. build_connector_meta uses this
+        # to size slot_mapping correctly when the match length is shorter
+        # than the current prompt.
+        self._matched_len: dict[str, int] = {}
         # Cache to avoid re-hashing in this step
         self._hash_cache: dict[str, str] = {}
 
@@ -246,21 +267,42 @@ class _Scheduler:
         hits = self._client.client.catalog.lookup({request_hash})
         return bool(hits)
 
+    def _any_prefix_in_catalog(self, aligned_tokens: list) -> bool:
+        """Check if any block-aligned prefix of `aligned_tokens` is cached."""
+        bs = self._block_size
+        for n in range(len(aligned_tokens), bs - 1, -bs):
+            if self._catalog_has(_hash_token_ids(aligned_tokens[:n])):
+                return True
+        return False
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int,
     ) -> tuple[Optional[int], bool]:
+        """Find the LONGEST block-aligned prompt prefix in the catalog.
+
+        Walks from the longest feasible aligned prefix down to one block;
+        returns the first hit's length (in tokens) minus num_computed_tokens.
+        Publishers emit multi-boundary entity tags (see `_Worker.wait_for_save`)
+        so different requests sharing a doc prefix can all hit the same
+        cached entry.
+        """
         token_ids = list(request.prompt_token_ids or [])
-        num_to_check = _align_to_block(len(token_ids) - 1, self._block_size)
-        if num_to_check <= num_computed_tokens:
+        bs = self._block_size
+        max_aligned = _align_to_block(len(token_ids) - 1, bs)
+        if max_aligned <= num_computed_tokens:
             return 0, False
 
-        prefix_hash = _hash_token_ids(token_ids[:num_to_check])
-        if not self._catalog_has(prefix_hash):
-            return 0, False
-
-        logger.info('EdgeServe cache HIT for request %s (%d tokens matched)',
-                    request.request_id, num_to_check)
-        return num_to_check - num_computed_tokens, False
+        # Try longest prefix first. Each candidate length is a multiple of bs.
+        for n in range(max_aligned, max(num_computed_tokens, bs) - 1, -bs):
+            h = _hash_token_ids(token_ids[:n])
+            if self._catalog_has(h):
+                logger.info(
+                    'EdgeServe cache HIT for request %s (%d of %d tokens matched)',
+                    request.request_id, n, len(token_ids),
+                )
+                self._matched_len[request.request_id] = n
+                return n - num_computed_tokens, False
+        return 0, False
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks",
@@ -284,11 +326,17 @@ class _Scheduler:
             block_ids = new_req.block_ids[0]
 
             if new_req.req_id in self._requests_need_load:
-                num_to_check = _align_to_block(len(token_ids) - 1, self._block_size)
-                aligned_tokens = token_ids[:num_to_check]
+                # Use the prefix length the scheduler matched (may be shorter
+                # than the full aligned prompt when doc+suffix is longer than
+                # the cached doc).
+                matched_n = self._matched_len.get(
+                    new_req.req_id,
+                    _align_to_block(len(token_ids) - 1, self._block_size),
+                )
+                aligned_tokens = token_ids[:matched_n]
                 req_hash = _hash_token_ids(aligned_tokens)
                 slot = _slot_mapping_from_blocks(
-                    block_ids, self._block_size, len(aligned_tokens),
+                    block_ids, self._block_size, matched_n,
                 )
                 meta.requests.append(_ReqSpec(
                     request_hash=req_hash,
@@ -299,9 +347,13 @@ class _Scheduler:
                 total_load += 1
             else:
                 num_to_check = _align_to_block(len(token_ids) - 1, self._block_size)
+                if num_to_check <= 0:
+                    continue
                 aligned_tokens = token_ids[:num_to_check]
                 req_hash = _hash_token_ids(aligned_tokens)
-                if not self._catalog_has(req_hash):
+                # Only store when we didn't match ANY prefix length (avoids
+                # redundant stores when a shorter prefix already hits).
+                if not self._any_prefix_in_catalog(aligned_tokens):
                     slot = _slot_mapping_from_blocks(
                         block_ids, self._block_size, len(aligned_tokens),
                     )
@@ -343,6 +395,7 @@ class _Scheduler:
 
         self._requests_need_load.clear()
         self._hash_cache.clear()
+        self._matched_len.clear()
         if total_load or total_store:
             logger.info('EdgeServe build_connector_meta: load=%d store=%d',
                         total_load, total_store)
@@ -415,6 +468,7 @@ class _Worker:
 
             # forward_context.no_compile_layers is {name: module}; each
             # attention module has .kv_cache attribute holding the paged buffer.
+            want_n = req.slot_mapping.shape[0]
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
                 kv_cache_layer = getattr(layer, 'kv_cache', None)
@@ -426,6 +480,10 @@ class _Worker:
                 # attn_metadata can be a dict keyed by layer_name (Triton backend).
                 layer_attn = attn_metadata.get(layer_name) \
                     if isinstance(attn_metadata, dict) else attn_metadata
+                # Saved tensor may have MORE tokens than we want (publisher
+                # had a longer prompt; this consumer matched a shorter
+                # prefix). Slice to want_n along the correct axis.
+                src = _slice_first_n_tokens(src, want_n, layer_attn)
                 _inject_kv_into_layer(
                     kv_cache_layer, src, req.slot_mapping,
                     layer_attn, self._block_size,
@@ -458,7 +516,10 @@ class _Worker:
                 logger.exception('EdgeServe extract_kv failed on %s: %s',
                                  layer_name, e)
                 continue
-            self._pending_saves.setdefault(req.request_hash, {})[layer_name] = \
+            entry = self._pending_saves.setdefault(
+                req.request_hash, {'layers': {}, 'token_ids': req.token_ids},
+            )
+            entry['layers'][layer_name] = \
                 kv_slice.detach().cpu().contiguous()
 
     def wait_for_save(self) -> None:
@@ -470,19 +531,43 @@ class _Worker:
             self._pending_saves.clear()
             return
 
-        for req_hash, layers in self._pending_saves.items():
+        # Publish each cached entry under ALL its block-boundary prefix
+        # hashes as bloom entities on a single header. This lets a consumer
+        # with a shorter / differently-suffixed prompt still hit the cache
+        # via the LONGEST SHARED prefix.
+        for req_hash, entry in self._pending_saves.items():
+            layers = entry.get('layers', {}) if isinstance(entry, dict) else entry
+            token_ids = entry.get('token_ids', []) if isinstance(entry, dict) else []
             if not layers:
                 continue
             try:
                 blob = st_save(layers)
-                self._client.client.publish({req_hash}, blob)
+                entities = self._multi_boundary_hashes(token_ids, req_hash)
+                self._client.client.publish(entities, blob)
                 logger.info(
-                    'EdgeServe: published KV for hash=%s (%d layers, %.2f MB)',
-                    req_hash, len(layers), len(blob) / 1e6,
+                    'EdgeServe: published KV for hash=%s (%d layers, %.2f MB, '
+                    '%d prefix tags)',
+                    req_hash, len(layers), len(blob) / 1e6, len(entities),
                 )
             except Exception as e:
                 logger.exception('EdgeServe publish failed: %s', e)
         self._pending_saves.clear()
+
+    def _multi_boundary_hashes(
+        self, token_ids: list, full_hash: str,
+    ) -> set:
+        """Return hashes at every block-boundary prefix so that any consumer
+        whose prompt shares a block-aligned prefix with us can find this
+        entry in the catalog."""
+        entities = {full_hash}
+        if not token_ids:
+            return entities
+        bs = self._block_size
+        for n in range(bs, len(token_ids) + 1, bs):
+            if n == len(token_ids):
+                continue  # already included as full_hash
+            entities.add(_hash_token_ids(list(token_ids[:n])))
+        return entities
 
     def get_finished(
         self, finished_req_ids: set[str],
