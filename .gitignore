@@ -132,3 +132,14 @@ no-upload/
 
 # pdoc documentation
 docs/
+
+# Scratch files + pre-existing experiments that should not be committed on
+# this branch. They stay on disk for reference but git ignores them so they
+# don't get swept into commits via `git add -A`.
+curl_publish.txt
+test.txt
+time-vs-data-triggered-join.txt
+edgeserve/scheduler.py
+edgeserve/scheduler_complex.py
+tests/test_audio_recv.py
+tests/wandb-comp/
