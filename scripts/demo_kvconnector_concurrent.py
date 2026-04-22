@@ -60,9 +60,19 @@ def main():
     args = parser.parse_args()
 
     topic = f'kvcache-conc-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}'
-    prompt = 'The city of Chicago is on Lake Michigan. ' * args.doc_repeats
+    doc = 'The city of Chicago is on Lake Michigan. ' * args.doc_repeats
+    # Each worker uses a slightly different suffix so the demo exercises
+    # EdgeServeKVConnector's prefix-boundary matching (shared doc, unique
+    # suffix), not just exact-match cache hits.
+    personas = [
+        ' As an SRE, list infra concerns.',
+        ' As a historian, highlight key dates.',
+        ' As a tourist, suggest activities.',
+        ' As a biologist, discuss ecosystem.',
+    ]
+    prompts = [doc + personas[i % len(personas)] for i in range(args.num_workers)]
     print(f'topic = {topic}')
-    print(f'prompt len = {len(prompt)} chars')
+    print(f'doc len = {len(doc)} chars; per-worker suffix differs')
     print(f'spawning {args.num_workers} workers (each ~{args.gpu_mem*12:.1f} GB)...')
 
     procs = []
@@ -85,9 +95,9 @@ def main():
             print(f'  worker {i} ready')
 
     try:
-        print('\n--- round 1: worker 0 (fresh, expect MISS + publish)')
+        print('\n--- round 1: worker 0 seeds with its unique suffix (MISS + publish)')
         t0 = time.perf_counter()
-        _send(procs[0], {'cmd': 'run', 'prompt': prompt, 'max_new_tokens': 1})
+        _send(procs[0], {'cmd': 'run', 'prompt': prompts[0], 'max_new_tokens': 1})
         r0 = _await(procs[0], 'RESULT')
         wall0 = (time.perf_counter() - t0) * 1000
         print(f'  worker 0: gen={r0["gen_ms"]:.1f}ms token={r0["output_token"]} '
@@ -95,27 +105,27 @@ def main():
 
         time.sleep(0.5)  # let publish propagate
 
-        print('\n--- round 2: worker 1..N (same prompt, expect HIT + load)')
+        print('\n--- round 2: workers 1..N run with DIFFERENT suffixes '
+              '(expect prefix HIT on shared doc)')
         round2 = []
         for i in range(1, args.num_workers):
             t0 = time.perf_counter()
-            _send(procs[i], {'cmd': 'run', 'prompt': prompt, 'max_new_tokens': 1})
+            _send(procs[i], {'cmd': 'run', 'prompt': prompts[i], 'max_new_tokens': 1})
             r = _await(procs[i], 'RESULT')
             wall = (time.perf_counter() - t0) * 1000
             print(f'  worker {i}: gen={r["gen_ms"]:.1f}ms token={r["output_token"]} '
                   f'wall={wall:.0f}ms')
             round2.append(r)
 
-        correct = all(r['output_token'] == r0['output_token'] for r in round2)
-        speedup = (sum(r['gen_ms'] for r in round2) / len(round2)
-                   if round2 else 0)
         print()
-        print(f'seed gen:    {r0["gen_ms"]:.1f}ms  (miss)')
+        print(f'seeder gen (full prefill, worker 0): {r0["gen_ms"]:.1f}ms')
         if round2:
             mean_r2 = sum(r['gen_ms'] for r in round2) / len(round2)
-            print(f'consumer gen (mean): {mean_r2:.1f}ms  (hit)')
-            print(f'gen speedup: {r0["gen_ms"]/max(mean_r2, 1e-3):.2f}x')
-        print(f'correctness (same token): {correct}')
+            print(f'consumer gen mean (prefix-hit, workers 1..{args.num_workers-1}): '
+                  f'{mean_r2:.1f}ms')
+            print(f'seeder / consumer speedup: {r0["gen_ms"]/max(mean_r2, 1e-3):.2f}x')
+        print(f'distinct tokens produced (different suffixes): '
+              f'{len(set(r["output_token"] for r in [r0] + round2))}')
     finally:
         for p in procs:
             try:
