@@ -136,6 +136,10 @@ def run_trial(
             'max_new_tokens': max_new_tokens,
         })
         results[0] = _await_result(workers[0], 'worker-0')
+        # Give the other workers' catalog consumer threads a beat to pull the
+        # header from Pulsar before they call resolve(). Real deployments see
+        # this propagation delay too; this just makes it deterministic here.
+        time.sleep(0.2)
         # Everyone else issues resolve concurrently.
         for i in range(1, len(workers)):
             _send(workers[i], {
@@ -188,6 +192,9 @@ def main():
         print(f'\n=== mode={mode} agents={args.num_agents} '
               f'doc~={args.doc_tokens} model={args.model} ===', flush=True)
         workers: List[subprocess.Popen] = []
+        # One shared topic per mode-run so every worker's catalog sees
+        # every worker's publish.
+        headers_topic = f'kvcache-bench-{mode}-{uuid.uuid4().hex[:8]}'
         try:
             for i in range(args.num_agents):
                 wid = f'worker-{i}'
@@ -198,7 +205,7 @@ def main():
                     '--worker-id', wid,
                     '--model', args.model,
                     '--pulsar-url', args.pulsar_url,
-                    '--headers-topic', f'kvcache-bench-{mode}-{uuid.uuid4().hex[:8]}',
+                    '--headers-topic', headers_topic,
                     '--cache-dir', cache_dir,
                     '--mode', mode,
                 ]
