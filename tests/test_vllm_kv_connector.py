@@ -22,11 +22,28 @@ def test_connector_module_imports():
     assert callable(register)
 
 
-def test_metadata_instantiates_with_empty_per_request():
+def test_metadata_instantiates_with_empty_requests():
     from edgeserve.inference.vllm_kv_connector import EdgeServeKVMetadata
     m = EdgeServeKVMetadata()
-    assert isinstance(m.per_request, dict)
-    assert m.per_request == {}
+    assert isinstance(m.requests, list)
+    assert m.requests == []
+
+
+def test_helpers_shape():
+    from edgeserve.inference.vllm_kv_connector import (
+        _align_to_block, _hash_token_ids, _slot_mapping_from_blocks,
+    )
+    # alignment drops the partial tail block
+    assert _align_to_block(127, 16) == 112
+    assert _align_to_block(16, 16) == 0
+    assert _align_to_block(17, 16) == 16
+    # deterministic hashing
+    assert _hash_token_ids([1, 2, 3]) == _hash_token_ids([1, 2, 3])
+    assert _hash_token_ids([1, 2, 3]) != _hash_token_ids([1, 2, 4])
+    # slot mapping: blocks [3, 7] at block_size=4 for 7 tokens
+    #   -> tokens 12,13,14,15 (block 3) and 28,29,30 (block 7 trimmed)
+    sm = _slot_mapping_from_blocks([3, 7], 4, 7)
+    assert sm.tolist() == [12, 13, 14, 15, 28, 29, 30]
 
 
 def test_register_is_idempotent():
