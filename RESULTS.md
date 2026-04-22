@@ -231,6 +231,21 @@ python scripts/demo_kvconnector_two_stage.py \
     --max-model-len 4096
 ```
 
+### Negative and multi-entry validation
+
+- `scripts/probe_kvconnector_negative.py` — seed prompt A, consumer sends
+  DIFFERENT prompt B. Result: consumer logs `build_connector_meta load=0
+  store=1` (miss path), no "cache HIT" log, no speedup, output tokens
+  differ. Bloom filter + hash do not produce false positives.
+
+- `scripts/probe_kvconnector_multi.py` — seed prompt A, seed prompt B on
+  the same topic, consumer sends prompt A. Consumer correctly loads A's
+  KV (same output token as seeder A, different from seeder B) with a
+  2.19× gen-time speedup. The catalog correctly disambiguates multiple
+  entries by the request's prefix hash.
+
+Both passed on Qwen2.5-0.5B / 3080 Ti / bf16.
+
 Multi-worker vLLM on one 12 GB GPU is memory-tight — each Qwen2.5-1.5B
 instance wants ~4–5 GB (weights + CUDA graphs + KV). Running 2+ vLLM
 workers on one GPU requires careful `--vllm-gpu-mem` tuning or a bigger
