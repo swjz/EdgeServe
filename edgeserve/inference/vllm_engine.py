@@ -92,8 +92,9 @@ class VLLMEngine(InferenceEngine):
         """
         if not token_ids:
             return None
+        # vLLM 0.19 accepts a bare list[int] (or list of list[int]) as `prompts`.
         self._llm.generate(
-            prompt_token_ids=[list(token_ids)],
+            prompts=[list(token_ids)],
             sampling_params=self._SamplingParams(max_tokens=1, temperature=0.0),
             use_tqdm=False,
         )
@@ -114,7 +115,7 @@ class VLLMEngine(InferenceEngine):
             temperature=0.0 if greedy else 1.0,
         )
         outputs = self._llm.generate(
-            prompt_token_ids=[list(token_ids)],
+            prompts=[list(token_ids)],
             sampling_params=sp,
             use_tqdm=False,
         )

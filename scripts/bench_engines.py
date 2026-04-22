@@ -122,13 +122,14 @@ def bench_vllm_prefix(model_id, dtype, doc_ids, suffixes, max_new, gpu_mem) -> d
     prompts = [list(doc_ids) + list(s) for s in suffixes]
 
     # Warmup pass (prime CUDA kernels and fill prefix cache for the doc).
-    llm.generate(prompt_token_ids=[prompts[0]], sampling_params=sp, use_tqdm=False)
+    # vLLM 0.19 accepts list[int] or list[list[int]] as `prompts`.
+    llm.generate(prompts=[prompts[0]], sampling_params=sp, use_tqdm=False)
 
     # Timed pass: all N requests. First one is redundant with warmup (cache
     # is already populated), but we want to measure the steady state of
     # N requests sharing a prefix. Comparable to the eager/oracle loops above.
     start = time.perf_counter()
-    llm.generate(prompt_token_ids=prompts, sampling_params=sp, use_tqdm=False)
+    llm.generate(prompts=prompts, sampling_params=sp, use_tqdm=False)
     wall = time.perf_counter() - start
     return {'time_s': wall}
 
