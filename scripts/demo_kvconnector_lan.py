@@ -109,8 +109,8 @@ if __name__ == '__main__':
     elapsed = (time.perf_counter() - t0) * 1000
     tok = out[0].outputs[0].token_ids[0]
     print(f'[seeder] elapsed={{elapsed:.1f}}ms  token={{tok}}', flush=True)
-    print(f'[seeder] doc_id={repr(doc_id)}', flush=True)
-    print(f'[seeder] topic={repr(topic)}', flush=True)
+    print('[seeder] doc_id=' + {repr(doc_id)}, flush=True)
+    print('[seeder] topic=' + {repr(topic)}, flush=True)
     print('[seeder] KV published — HTTP server running, ^C to stop', flush=True)
     # Keep process alive so HTTP server stays up for consumer
     try:
