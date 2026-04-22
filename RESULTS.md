@@ -246,6 +246,35 @@ python scripts/demo_kvconnector_two_stage.py \
 
 Both passed on Qwen2.5-0.5B / 3080 Ti / bf16.
 
+### Concurrent multi-worker (live vLLM instances sharing KV)
+
+`scripts/demo_kvconnector_concurrent.py` spawns N long-lived vLLM
+workers sharing one Pulsar topic. Worker 0 runs a prompt first (MISS,
+publishes); workers 1..N run the same prompt (HIT, load via connector).
+All workers are alive simultaneously on the same GPU — this is the
+scenario where vLLM's per-instance internal prefix cache can't help,
+because each instance has its own isolated cache.
+
+Qwen2.5-0.5B / bf16 / 3080 Ti, 3 concurrent workers (gpu-mem=0.25 each):
+
+| doc (chars) | worker 0 gen (miss) | workers 1+2 gen (hit, mean) | **gen speedup** | correct |
+|------------:|--------------------:|----------------------------:|----------------:|:-------:|
+|       ~2.6k |               75 ms |                        34 ms |         2.23×  |    ✓    |
+|       ~10k  |              141 ms |                        63 ms |         2.25×  |    ✓    |
+|       ~20k  |              279 ms |                       103 ms |       **2.70×** |   ✓    |
+
+Max concurrent Qwen2.5-0.5B vLLM instances on 12 GB: 3 (each needs
+~3.2 GB model+graphs+KV at `--gpu-mem 0.25`). For bigger GPUs or smaller
+models, scaling further is straightforward — the routing layer cost is
+sub-millisecond; it's the per-instance vLLM memory that limits N.
+
+### Two-stage vs concurrent
+
+Same numerical result (≈2× speedup) across two-stage and concurrent —
+confirming the connector path is stable whether the vLLM instances are
+sequential or simultaneous. Concurrent is the more realistic
+deployment scenario.
+
 Multi-worker vLLM on one 12 GB GPU is memory-tight — each Qwen2.5-1.5B
 instance wants ~4–5 GB (weights + CUDA graphs + KV). Running 2+ vLLM
 workers on one GPU requires careful `--vllm-gpu-mem` tuning or a bigger
