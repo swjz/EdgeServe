@@ -53,12 +53,22 @@ def main():
     parser.add_argument('--mode', choices=['eager', 'routed'], default='routed')
     args = parser.parse_args()
 
-    import torch  # noqa: F401
+    import torch
     from edgeserve.inference.hf_engine import HFEngine
 
     device = _device_from_env()
     dtype = _dtype_from_env()
     engine = HFEngine(args.model, device=device, dtype=dtype)
+
+    # Warmup: first forward pass on CUDA pays one-time kernel compile and
+    # allocator growth costs. Without this, whichever trial runs first on
+    # this worker eats those costs, skewing timings.
+    warmup_tokens = engine.tokenize('hello world ' * 32)
+    _ = engine.prefill(warmup_tokens)
+    _, _ = engine.generate(warmup_tokens[:4], max_new_tokens=4)
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    torch.cuda.empty_cache() if device == 'cuda' else None
 
     cache_client = None
     if args.mode == 'routed':
