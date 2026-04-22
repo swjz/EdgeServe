@@ -232,6 +232,16 @@ def main():
     parser.add_argument('--warm-cache', action='store_true',
                         help='Measure only N-1 consumer requests after the seed '
                              'has already published. Steady-state deployment metric.')
+    parser.add_argument('--engine', choices=['hf', 'vllm'], default='hf',
+                        help='Inference engine each worker uses. vLLM brings '
+                             'FlashAttention + PagedAttention + continuous batching '
+                             '(faster eager), but does not yet support cache transfer '
+                             'across processes (needs a vllm.KVConnectorBase_V1). With '
+                             '--engine vllm, only eager mode is meaningful; routed mode '
+                             'falls back to eager-equivalent behavior.')
+    parser.add_argument('--vllm-gpu-mem', type=float, default=0.35,
+                        help='Per-worker vLLM gpu_memory_utilization. With N workers '
+                             'on one GPU, total = N * this must leave headroom.')
     args = parser.parse_args()
 
     os.makedirs(args.cache_root, exist_ok=True)
@@ -259,6 +269,8 @@ def main():
                     '--headers-topic', headers_topic,
                     '--cache-dir', cache_dir,
                     '--mode', mode,
+                    '--engine', args.engine,
+                    '--gpu-memory-utilization', str(args.vllm_gpu_mem),
                 ]
                 proc = _spawn(cmd, {
                     'EDGESERVE_DEVICE': args.device,
@@ -303,6 +315,14 @@ def main():
     # Routed breakdown: show the first trial's per-worker metrics.
     if 'routed' in summary and summary['routed']['trials']:
         first = summary['routed']['trials'][0]
+        # Flag if any worker signaled the engine can't do cross-process KV today.
+        degenerate = any(
+            m.get('cache_transport_unsupported') for m in first['per_worker']
+        )
+        if degenerate:
+            print('\nNOTE: at least one worker reported cache_transport_unsupported '
+                  '(e.g. --engine vllm without a KVConnector). routed mode degenerates '
+                  'to eager for those workers.')
         print('\nrouted trial 1 per-worker metrics (ms):')
         for m in first['per_worker']:
             if m.get('cache_hit'):

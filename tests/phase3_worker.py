@@ -51,14 +51,35 @@ def main():
     parser.add_argument('--cache-dir', required=True)
     parser.add_argument('--http-port', type=int, default=0)
     parser.add_argument('--mode', choices=['eager', 'routed'], default='routed')
+    parser.add_argument('--engine', choices=['hf', 'vllm'], default='hf',
+                        help='Inference engine. vLLM wins on kernels/batching but '
+                             'does not yet support cache serialize/deserialize (requires '
+                             'a vllm.KVConnectorBase_V1 -- roadmap). vLLM + routed mode '
+                             'is therefore equivalent to eager today.')
+    parser.add_argument('--gpu-memory-utilization', type=float, default=0.4,
+                        help='vLLM only; leaves headroom for multiple workers on one GPU')
     args = parser.parse_args()
 
     import torch
-    from edgeserve.inference.hf_engine import HFEngine
 
     device = _device_from_env()
     dtype = _dtype_from_env()
-    engine = HFEngine(args.model, device=device, dtype=dtype)
+
+    if args.engine == 'hf':
+        from edgeserve.inference.hf_engine import HFEngine
+        engine = HFEngine(args.model, device=device, dtype=dtype)
+    elif args.engine == 'vllm':
+        from edgeserve.inference.vllm_engine import VLLMEngine
+        vllm_dtype = {'fp32': 'float32', 'fp16': 'float16', 'bf16': 'bfloat16',
+                       torch.float32: 'float32', torch.float16: 'float16',
+                       torch.bfloat16: 'bfloat16'}.get(dtype, 'bfloat16')
+        engine = VLLMEngine(
+            args.model, device=device, dtype=vllm_dtype,
+            enable_prefix_caching=True,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+        )
+    else:
+        raise ValueError(f'unknown engine {args.engine}')
 
     # Warmup: first forward pass on CUDA pays one-time kernel compile and
     # allocator growth costs. Without this, whichever trial runs first on
@@ -116,9 +137,14 @@ def main():
             reused_cache = None
             if args.mode == 'routed' and cache_tags:
                 t0 = time.perf_counter()
-                hit = cache_client.resolve_into(cache_tags, engine, timeout=5.0)
-                # resolve_into combines fetch + deserialize; we report them
-                # together as `fetch_deserialize_ms` rather than splitting.
+                try:
+                    hit = cache_client.resolve_into(cache_tags, engine, timeout=5.0)
+                except NotImplementedError:
+                    # Engine (e.g. vLLM today) doesn't support KV import.
+                    # Fall through to fresh prefill; note this in metrics so
+                    # the coordinator can flag a degenerate routed run.
+                    hit = None
+                    m['cache_transport_unsupported'] = True
                 m['fetch_deserialize_ms'] = (time.perf_counter() - t0) * 1000
                 if hit is not None:
                     reused_cache, header, info = hit
@@ -143,14 +169,17 @@ def main():
             m['new_tokens'] = len(new_tokens)
 
             if publish and args.mode == 'routed' and not m['cache_hit']:
-                t0 = time.perf_counter()
-                blob = engine.serialize_cache(final_cache)
-                m['serialize_ms'] = (time.perf_counter() - t0) * 1000
-                m['published_bytes'] = len(blob)
-                t1 = time.perf_counter()
-                cache_client.publish(set(cache_tags), blob)
-                m['publish_ms'] = (time.perf_counter() - t1) * 1000
-                m['published'] = True
+                try:
+                    t0 = time.perf_counter()
+                    blob = engine.serialize_cache(final_cache)
+                    m['serialize_ms'] = (time.perf_counter() - t0) * 1000
+                    m['published_bytes'] = len(blob)
+                    t1 = time.perf_counter()
+                    cache_client.publish(set(cache_tags), blob)
+                    m['publish_ms'] = (time.perf_counter() - t1) * 1000
+                    m['published'] = True
+                except NotImplementedError:
+                    m['cache_transport_unsupported'] = True
 
             m['total_ms'] = (time.perf_counter() - t_start) * 1000
             print(f'RESULT {json.dumps(m)}', flush=True)
