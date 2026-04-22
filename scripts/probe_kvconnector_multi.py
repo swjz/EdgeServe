@@ -55,8 +55,14 @@ def main():
     topic = f'kvcache-multi-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}'
     print(f'topic = {topic}')
 
-    prompt_a = 'Chicago was founded in 1833 and is on Lake Michigan. ' * 32
-    prompt_b = 'Paris is the capital of France. The Seine flows through it. ' * 32
+    prompt_a = (
+        'The scientific method involves observation, hypothesis, experiment, and conclusion. '
+        'Consider the following chemistry problem step by step. '
+    ) * 64
+    prompt_b = (
+        'Once upon a time there was a brave knight who traveled to a faraway castle. '
+        'Describe what the knight would do next in the story. '
+    ) * 64
 
     print('\n=== seeder A')
     seed_a = run(prompt_a, topic, 'seeder', args)
