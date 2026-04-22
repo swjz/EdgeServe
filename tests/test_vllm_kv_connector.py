@@ -96,6 +96,59 @@ def test_slice_first_n_tokens_handles_flash_and_triton_layouts():
     assert sliced.shape == (3, 4, 8)
 
 
+def test_scheduler_prefix_match_finds_longest():
+    """Scheduler should return the LONGEST block-boundary prefix in the catalog."""
+    from edgeserve.inference.vllm_kv_connector import (
+        _Scheduler, _hash_token_ids,
+    )
+
+    class FakeRequest:
+        def __init__(self, token_ids, req_id='r0'):
+            self.prompt_token_ids = token_ids
+            self.request_id = req_id
+
+    class FakeCatalog:
+        def __init__(self, known_hashes):
+            self._known = set(known_hashes)
+        def lookup(self, entities):
+            for e in entities:
+                if e in self._known:
+                    return [object()]  # any truthy list
+            return []
+
+    class FakeClient:
+        def __init__(self, known_hashes):
+            self.catalog = FakeCatalog(known_hashes)
+
+    class FakeBackend:
+        def __init__(self, known_hashes):
+            self.client = FakeClient(known_hashes)
+
+    # Seed catalog with two prefix hashes: first 16 tokens and first 48 tokens.
+    tokens = list(range(80))
+    known = {
+        _hash_token_ids(tokens[:16]),
+        _hash_token_ids(tokens[:48]),
+    }
+    sched = object.__new__(_Scheduler)
+    sched._vllm_config = None
+    sched._kv_cache_config = None
+    sched._client = FakeBackend(known)
+    sched._block_size = 16
+    sched._requests_need_load = {}
+    sched._matched_len = {}
+    sched._hash_cache = {}
+
+    # Request is 80 tokens. Longest aligned = 64. The catalog doesn't have
+    # hash(tokens[:64]); it has hash(tokens[:48]) and hash(tokens[:16]).
+    # Scheduler should return 48 (longest hit).
+    req = FakeRequest(tokens)
+    n_matched, load_async = sched.get_num_new_matched_tokens(req, 0)
+    assert n_matched == 48
+    assert load_async is False
+    assert sched._matched_len[req.request_id] == 48
+
+
 def test_multi_boundary_hashes_produces_every_block_boundary():
     """Publisher's wait_for_save emits entity tags at every block boundary
     so a consumer with a shorter prefix still finds the entry."""
