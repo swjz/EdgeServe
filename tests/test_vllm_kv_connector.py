@@ -182,6 +182,19 @@ def test_set_request_entities_side_channel():
     assert 'r1' not in _REQUEST_ENTITIES
 
 
+def test_set_next_request_entities():
+    """set_next_request_entities is consumed by the first request (any id)."""
+    import edgeserve.inference.vllm_kv_connector as mod
+    from edgeserve.inference.vllm_kv_connector import set_next_request_entities
+    set_next_request_entities({'doc:wiki'})
+    assert mod._NEXT_REQUEST_ENTITIES == frozenset({'doc:wiki'})
+    # Simulate scheduler consuming it
+    ents = mod._NEXT_REQUEST_ENTITIES
+    mod._NEXT_REQUEST_ENTITIES = frozenset()
+    assert ents == frozenset({'doc:wiki'})
+    assert mod._NEXT_REQUEST_ENTITIES == frozenset()
+
+
 def test_entity_first_scheduler_path():
     """Scheduler finds a catalog hit by entity tags and returns num_tokens."""
     import uuid

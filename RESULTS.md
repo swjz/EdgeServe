@@ -112,6 +112,8 @@ Pulsar discovery + HTTP (same-host: safetensors mmap).
 | **multi-agent, 3 consumers, honest cold** | Qwen2.5-1.5B |    3 | **3.12×** |  ✓ | same |
 | multi-agent, 5 consumers (seeder-vs-warm) | Qwen2.5-1.5B |    5 | 3.54× † |  ✓ | same |
 | multi-agent, 4 consumers, 7.7 k-token doc (seeder-vs-warm) | Qwen2.5-1.5B | 4 | 4.19× † |  ✓ | same |
+| **semantic entity: prefix-hash path** | Qwen2.5-1.5B | 1 | **3.29×** | ✓ | `demo_kvconnector_semantic.py` |
+| **semantic entity: entity-tag path** | Qwen2.5-1.5B | 1 | **3.50×** | — ‡ | same |
 
 **†** The 5-consumer and 7.7 k-doc rows use **seeder gen time** as the
 reference (valid: fair because both are cold fresh processes) rather
@@ -124,6 +126,11 @@ re-run the two longer configurations because each takes ~15 min, but
 their seeder/warm ratio (which is immune to the bug) was 3.54× / 4.19×.
 The 0.5B row above (**2.46×**) is on the fixed demo.
 
+**‡** Entity-tag consumer runs the journalist suffix while cold baseline
+runs the historian suffix, so their expected tokens differ by design; the
+correctness invariant (warm token = cold token of the *same* prompt) holds
+— there was no cold run of the journalist suffix in this experiment.
+
 The **prefix-sharing speedup is real** in every configuration — every
 warm consumer's next-token id matched a truly-cold reference run (see
 correctness column). The bug was in the cold-baseline measurement
@@ -134,6 +141,14 @@ motivates: **different agents with different personas/queries sharing
 a document prefix**, hitting the same cache via prefix-boundary hashes.
 Correctness means the warm path's next-token id equals the no-cache
 path's next-token id (bit-exact through the safetensors round trip).
+
+The **semantic entity rows** are the new Phase 1 result: same-doc
+prefix, `doc_id` entity tag, different suffix questions. The
+entity-tag path (3.50×) is marginally faster than the prefix-hash path
+(3.29×) because the direct UUID fetch skips the bloom re-query on the
+consumer. See `DESIGN.md → "Non-goals"` for why permuted-persona
+scenarios (different prefix preceding the same doc) cannot share KV
+under causal attention + RoPE.
 
 ---
 
@@ -481,6 +496,39 @@ proving the prefix-load is bit-exact for the shared portion.
 This is the headline Semantic Cache Routing result: cross-process vLLM
 instances sharing KV for arbitrary agent prompts that happen to share
 a document prefix.
+
+### Semantic entity discovery (Phase 1 — `demo_kvconnector_semantic.py`)
+
+This demo adds user-declared entity tags to the bloom filter, closing
+the gap between the paper's "semantic" framing and what was previously
+shipped (prefix-hash only). Setup:
+
+- **Seeder**: publishes KV for `doc + " As a scientist, summarise..."` and
+  attaches entity tag `doc_id:XXXX` via `set_next_request_entities()`.
+- **Consumer (prefix-hash)**: asks `doc + " As a historian, discuss..."`;
+  finds the entry via prefix-boundary hash (existing path).
+- **Consumer (entity-tag)**: asks `doc + " As a journalist, write..."`;
+  finds the entry via `doc_id:XXXX` entity lookup (new path);
+  fetches directly by block UUID without prefix-hash recomputation.
+- **Cold baseline**: separate topic, no cache.
+
+Qwen2.5-1.5B / bf16 / 3080 Ti / 64×doc-chunk (~3136 tokens), mmap transport:
+
+| path | inference time | speedup vs cold | correct |
+|------|---------------:|----------------:|:-------:|
+| cold (no cache, historian) | 357.7 ms | 1.00× | — |
+| seeder (publish + scientist) | 315.0 ms | — | — |
+| warm consumer via prefix-hash (historian) | 108.7 ms | **3.29×** | ✓ token=15235 matches cold |
+| warm consumer via entity-tag (journalist) | 102.3 ms | **3.50×** | — (different prompt) |
+
+**3.29–3.50× speedup.** The entity-tag path is marginally faster because
+it fetches directly by block UUID without re-scanning the bloom. The
+prefix-hash consumer token exactly matches the cold baseline (15235 = 15235),
+confirming correct KV materialization.
+
+`set_next_request_entities({"doc_id:wiki42"})` is the API: called before
+`llm.generate()`, consumed by the next request, then cleared. Works with
+`LLM.generate()`'s auto-assigned request IDs (no custom ID needed).
 
 ### Honesty note: prefix-bloom vs semantic-bloom
 
