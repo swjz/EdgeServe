@@ -106,3 +106,13 @@ class HFEngine(InferenceEngine):
     def deserialize_cache(self, blob: bytes) -> CacheHandle:
         from edgeserve.semantic_cache.kv_io import load_past_key_values
         return load_past_key_values(blob, device=self._device, as_cache=True)
+
+    def deserialize_cache_from_path(self, path: str) -> CacheHandle:
+        """Same-host fast path: mmap + direct-to-GPU safetensors load.
+
+        Called by `SemanticCacheClient.resolve_into` when the publisher is
+        on the same host. Skips the HTTP round trip and the bytes->CPU
+        tensor->device copy chain that `deserialize_cache` pays.
+        """
+        from edgeserve.semantic_cache.kv_io import load_past_key_values_from_path
+        return load_past_key_values_from_path(path, device=self._device, as_cache=True)

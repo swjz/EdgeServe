@@ -306,10 +306,13 @@ def main():
         print('\nrouted trial 1 per-worker metrics (ms):')
         for m in first['per_worker']:
             if m.get('cache_hit'):
-                print(f'  {m["worker_id"]}: resolve={m.get("resolve_ms", 0):.1f} '
-                      f'deserialize={m.get("deserialize_ms", 0):.1f} '
-                      f'generate={m["generate_ms"]:.1f} '
-                      f'fetched={m.get("fetched_bytes", 0)/1e6:.2f}MB')
+                where = m.get('transport', 'http')
+                size_str = ''
+                if 'fetched_bytes' in m:
+                    size_str = f' fetched={m["fetched_bytes"]/1e6:.2f}MB'
+                print(f'  {m["worker_id"]}: transport={where} '
+                      f'fetch+deserialize={m.get("fetch_deserialize_ms", 0):.1f} '
+                      f'generate={m["generate_ms"]:.1f}{size_str}')
             else:
                 extra = ''
                 if m.get('published'):

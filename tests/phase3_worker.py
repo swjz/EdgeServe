@@ -116,16 +116,19 @@ def main():
             reused_cache = None
             if args.mode == 'routed' and cache_tags:
                 t0 = time.perf_counter()
-                hit = cache_client.resolve(cache_tags, timeout=5.0)
-                m['resolve_ms'] = (time.perf_counter() - t0) * 1000
+                hit = cache_client.resolve_into(cache_tags, engine, timeout=5.0)
+                # resolve_into combines fetch + deserialize; we report them
+                # together as `fetch_deserialize_ms` rather than splitting.
+                m['fetch_deserialize_ms'] = (time.perf_counter() - t0) * 1000
                 if hit is not None:
-                    blob, header = hit
-                    t1 = time.perf_counter()
-                    reused_cache = engine.deserialize_cache(blob)
-                    m['deserialize_ms'] = (time.perf_counter() - t1) * 1000
+                    reused_cache, header, info = hit
                     m['cache_hit'] = True
                     m['source_uri'] = header.node_uri
-                    m['fetched_bytes'] = len(blob)
+                    m['transport'] = info['transport']
+                    if info['transport'] == 'http':
+                        m['fetched_bytes'] = info['bytes']
+                    else:
+                        m['fetched_path'] = info['path']
 
             t0 = time.perf_counter()
             prompt_tokens = engine.tokenize(prompt)

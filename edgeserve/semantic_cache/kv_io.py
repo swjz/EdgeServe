@@ -58,6 +58,36 @@ def save_past_key_values(past_key_values: Any) -> bytes:
     return save(flat, metadata=metadata)
 
 
+def load_past_key_values_from_path(
+    path: str, device: str = 'cpu', as_cache: bool = True
+) -> Any:
+    """Same-host fast path: load KV cache directly from a safetensors file.
+
+    Uses `safetensors.safe_open` which memory-maps the file and can load
+    tensors directly to the target device (e.g. 'cuda:0'), skipping the
+    bytes -> CPU tensor -> .to(device) round trip that `load_past_key_values`
+    pays when receiving a blob over HTTP.
+    """
+    from safetensors import safe_open
+
+    with safe_open(path, framework='pt', device=device) as st:
+        num_layers = int(st.metadata().get('num_layers', 0))
+        if num_layers == 0:
+            num_layers = sum(1 for k in st.keys() if k.startswith('k.'))
+        legacy = tuple(
+            (st.get_tensor(f'k.{i}'), st.get_tensor(f'v.{i}'))
+            for i in range(num_layers)
+        )
+
+    if not as_cache:
+        return legacy
+    try:
+        from transformers.cache_utils import DynamicCache
+        return DynamicCache(legacy)
+    except (ImportError, AttributeError, TypeError):
+        return legacy
+
+
 def load_past_key_values(
     blob: bytes, device: str = 'cpu', as_cache: bool = True
 ) -> Any:
