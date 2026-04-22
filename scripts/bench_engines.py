@@ -138,26 +138,32 @@ def bench_vllm_prefix(model_id, dtype, doc_ids, suffixes, max_new, gpu_mem) -> d
 # SGLang baseline (optional; installed separately).
 
 def bench_sglang_radix(model_id, dtype, doc_ids, suffixes, max_new) -> dict:
-    """Run the same workload through sglang's offline Engine with
-    RadixAttention enabled (it's on by default in sglang.Runtime)."""
-    # SGLang's offline API has changed across versions; pin to the current
-    # sglang.Engine interface.
-    try:
-        from sglang import Engine
-    except ImportError as e:
-        raise RuntimeError(f'sglang not importable: {e}')
+    """Run the same workload through sglang's offline Engine.
 
-    engine = Engine(model_path=model_id, dtype=dtype)
+    RadixAttention (sglang's prefix cache equivalent) is ON by default
+    (`disable_radix_cache=False`); we leave it that way. Memory is kept
+    modest via `mem_fraction_static` so sglang doesn't fight HF for VRAM
+    when both engines are benched in the same invocation.
+    """
+    from sglang.srt.entrypoints.engine import Engine
+
+    engine = Engine(
+        model_path=model_id,
+        dtype=dtype,
+        mem_fraction_static=0.5,
+        log_level='error',
+    )
     try:
-        # Warmup.
-        engine.generate(
-            input_ids=[list(doc_ids) + list(suffixes[0])],
-            sampling_params={'max_new_tokens': max_new, 'temperature': 0.0},
-        )
+        sp = {'max_new_tokens': max_new, 'temperature': 0.0}
+        # Warmup pass.
+        engine.generate(input_ids=[list(doc_ids) + list(suffixes[0])],
+                        sampling_params=sp)
+        # Timed pass: all N requests at once, so radix cache hits on the
+        # shared prefix across them.
         start = time.perf_counter()
         engine.generate(
             input_ids=[list(doc_ids) + list(s) for s in suffixes],
-            sampling_params={'max_new_tokens': max_new, 'temperature': 0.0},
+            sampling_params=sp,
         )
         wall = time.perf_counter() - start
         return {'time_s': wall}
