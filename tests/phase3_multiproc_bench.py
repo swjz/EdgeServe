@@ -271,7 +271,11 @@ def main():
                     '--mode', mode,
                     '--engine', args.engine,
                     '--gpu-memory-utilization', str(args.vllm_gpu_mem),
-                    '--max-model-len', str(args.doc_tokens + 512),
+                    # Generous headroom -- vLLM tokenizes prompts as-text, so the
+                    # actual token count can exceed doc_tokens by a lot once
+                    # persona + query are appended. 2x + 1024 is comfortable
+                    # and still lets KV cache fit on the per-worker mem budget.
+                    '--max-model-len', str(args.doc_tokens * 2 + 1024),
                 ]
                 proc = _spawn(cmd, {
                     'EDGESERVE_DEVICE': args.device,
