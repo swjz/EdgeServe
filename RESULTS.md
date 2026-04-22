@@ -38,6 +38,7 @@ Pulsar discovery + HTTP (same-host: safetensors mmap).
 | **prefix share, 1 consumer** | Qwen2.5-0.5B | 1 | **2.61×** | ✓ | `demo_kvconnector_prefix_share.py` |
 | **multi-agent, 5 consumers** | Qwen2.5-0.5B | 5 | **3.09×** | ✓ | `demo_kvconnector_multi_agent.py` |
 | multi-agent, 3 consumers | Qwen2.5-1.5B |    3 | 2.98× |  ✓ | same |
+| **multi-agent, 5 consumers** | Qwen2.5-1.5B | 5 | **3.54×** | ✓ | same |
 
 The prefix-share and multi-agent rows are the scenario the paper
 motivates: **different agents with different personas/queries sharing
