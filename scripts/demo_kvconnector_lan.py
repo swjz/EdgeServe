@@ -100,7 +100,7 @@ if __name__ == '__main__':
         enable_prefix_caching=False,
         kv_transfer_config=ktc,
         gpu_memory_utilization={args.gpu_mem},
-        max_model_len=8192,
+        max_model_len=16384,
     )
     set_next_request_entities({{{repr(doc_id)}}})
     prompt = {repr(doc)} + ' Summarise the key points.'
