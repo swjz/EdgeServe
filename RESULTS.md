@@ -189,12 +189,21 @@ connector.
 
 Qwen2.5-0.5B / bf16 / 3080 Ti / 1 output token, varying doc length:
 
-| doc (chars) | doc (aligned tokens) | seeder gen | consumer gen | **gen speedup** | correct |
-|------------:|---------------------:|-----------:|-------------:|----------------:|:-------:|
-|       ~1.3k |                   32 |      43 ms |        36 ms |          1.20×  |    ✓    |
-|       ~5.1k |                  144 |      92 ms |        40 ms |          2.30×  |    ✓    |
-|       ~10k  |                  ~300 |     137 ms |        61 ms |          2.25×  |    ✓    |
-|       ~20k  |                  ~500 |     270 ms |       109 ms |          2.47×  |    ✓    |
+| doc (chars) | seeder gen | consumer gen | **gen speedup** | correct |
+|------------:|-----------:|-------------:|----------------:|:-------:|
+|       ~1.3k |      43 ms |        36 ms |          1.20×  |    ✓    |
+|       ~5.1k |      92 ms |        40 ms |          2.30×  |    ✓    |
+|       ~10k  |     137 ms |        61 ms |          2.25×  |    ✓    |
+|       ~20k  |     270 ms |       109 ms |          2.47×  |    ✓    |
+
+Qwen2.5-1.5B / bf16 / 3080 Ti / 1 output token:
+
+| doc (chars) | seeder gen | consumer gen | **gen speedup** | correct |
+|------------:|-----------:|-------------:|----------------:|:-------:|
+|       ~2.6k |      99 ms |        46 ms |          2.15×  |    ✓    |
+|       ~5.1k |     163 ms |        66 ms |          2.49×  |    ✓    |
+|       ~10k  |     310 ms |       102 ms |          3.04×  |    ✓    |
+|       ~20k  |     585 ms |       177 ms |        **3.30×** |   ✓    |
 
 `correct` means seeder and consumer produced the **same next-token id**,
 proving the KV gather→publish→fetch→scatter round trip preserves the
