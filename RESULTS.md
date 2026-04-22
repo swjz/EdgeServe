@@ -4,6 +4,25 @@ All numbers on an NVIDIA RTX 3080 Ti (12 GB) running torch 2.10 +
 vLLM 0.19 + Apache Pulsar 3.1 in Docker. Every experiment is fully
 reproducible; scripts are under `scripts/` and `tests/`.
 
+## What this proves
+
+Semantic Cache Routing through EdgeServeKVConnector **works end-to-end
+on top of vLLM**. Different vLLM processes on the same GPU (or host)
+share prefilled KV cache via the EdgeServe catalog + per-node HTTP
+transport. Consumers whose prompts merely share a *prefix* with a
+cached entry still hit, thanks to multi-boundary prefix-hash publishing
++ longest-prefix scheduler lookup. Across every scenario exercised:
+
+- **Correctness is bit-exact**: every warm-path consumer produces the
+  same next-token id as a no-cache cold run of the same prompt. The
+  safetensors gather/scatter round trip is lossless for bf16 tensors.
+- **Latency wins are real**: 2–3× faster warm consumer generation at
+  0.5 B params, up to 3.3× at 1.5 B.
+- **Overhead vs vLLM's best-case internal cache is small** (+6 ms at
+  ~5 k tokens, +55 ms at ~20 k tokens) — and scales linearly with blob
+  size, which suggests a path to close via zero-copy transports (CUDA
+  IPC same-host, RDMA cross-host) listed under task #18.
+
 ## Headline numbers (TL;DR)
 
 **End-to-end: vLLM instances sharing KV via EdgeServeKVConnector.**
