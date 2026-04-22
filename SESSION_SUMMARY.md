@@ -75,7 +75,8 @@ Qwen2.5-1.5B:
 |----------|----------:|--------:|
 | 2-stage same prompt | 1 | 3.30× |
 | multi-agent | 3 | 2.98× |
-| **multi-agent** | 5 | **3.54×** |
+| multi-agent | 5 | 3.54× |
+| **multi-agent, 7.7 k-token doc** | 4 | **4.19×** |
 
 In every scenario the warm consumer's next-token id is bit-identical
 to a cold no-cache run of the same prompt — correctness is preserved.
