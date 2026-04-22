@@ -153,6 +153,36 @@ routed mode uses vLLM's kernels AND cross-process cache sharing,
 closing the gap against the single-process ceiling while scaling past
 one machine.
 
+## vLLM KVConnector scaffolding (task #20, partial)
+
+`edgeserve/inference/vllm_kv_connector.py` registers
+`EdgeServeKVConnector` with vLLM's built-in factory:
+
+```
+$ python scripts/probe_vllm_connector.py
+factory registered: [..., 'LMCacheConnectorV1', 'NixlConnector',
+                      'SimpleCPUOffloadConnector', 'EdgeServeKVConnector']
+probe OK (connector scaffolding is valid)
+```
+
+The class shape is complete: it inherits from `KVConnectorBase_V1`,
+implements every abstract method, and dispatches to `_Scheduler` /
+`_Worker` helpers in the pattern used by vLLM's own
+`SimpleCPUOffloadConnector`. Five pytest tests (`tests/test_vllm_kv_connector.py`)
+pin the contract.
+
+What's still stubbed (raises `NotImplementedError` until implemented):
+- `_Worker.save_kv_layer` — gather per-layer KV from PagedAttention blocks
+  and publish via `SemanticCacheClient.publish`.
+- `_Worker.start_load_kv` — fetch via `SemanticCacheClient.resolve_into`
+  and scatter into pre-allocated blocks.
+- `_Scheduler.get_num_new_matched_tokens` — look up in the bloom-filter
+  catalog by `prefix_hash`; today returns `(0, False)`.
+
+Once those land, running vLLM with
+`KVTransferConfig(kv_connector='EdgeServeKVConnector', ...)` gives
+Phase-3 routed mode vLLM's kernel speed + cross-process cache reuse.
+
 Multi-worker vLLM on one 12 GB GPU is memory-tight — each Qwen2.5-1.5B
 instance wants ~4–5 GB (weights + CUDA graphs + KV). Running 2+ vLLM
 workers on one GPU requires careful `--vllm-gpu-mem` tuning or a bigger
