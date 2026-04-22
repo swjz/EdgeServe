@@ -28,22 +28,40 @@ the last consumer returns.
 
 ## Warm-cache speedup (Qwen2.5, bf16, greedy, 1 new token)
 
-The per-consumer breakdown shows where the time goes on the routed path:
-`resolve` (catalog lookup + HTTP GET) → `deserialize` (safetensors →
-DynamicCache on GPU) → `generate` (suffix prefill + 1 new token).
+EdgeServe now picks the transport automatically: when publisher and
+consumer share a host, the consumer uses safetensors `safe_open(path,
+device='cuda')` to mmap the block file and load tensors directly onto
+the GPU, skipping the HTTP socket and the bytes→CPU→GPU copy chain.
 
-| model          | doc tok | N | eager (ms) | routed (ms) | routed / eager | KV blob | resolve | deserialize | generate |
-|----------------|--------:|--:|-----------:|------------:|---------------:|--------:|--------:|------------:|---------:|
-| Qwen2.5-0.5B   |    1024 | 2 |         54 |          57 |          0.94× |   20 MB |   22 ms |        6 ms |    44 ms |
-| Qwen2.5-0.5B   |    2048 | 2 |         89 |          82 |          1.09× |   39 MB |   34 ms |       17 ms |    41 ms |
-| Qwen2.5-0.5B   |    4096 | 2 |        169 |         146 |          1.16× |   76 MB |   69 ms |       34 ms |    38 ms |
-| Qwen2.5-1.5B   |    1024 | 2 |        112 |          96 |          1.17× |   46 MB |   41 ms |       22 ms |    54 ms |
-| Qwen2.5-1.5B   |    2048 | 2 |        203 |         153 |          1.32× |   90 MB |   85 ms |       42 ms |    47 ms |
-| Qwen2.5-1.5B   |    4096 | 2 |        407 |     **265** |      **1.54×** |  178 MB |  158 ms |       93 ms |    52 ms |
+| model          | doc tok | N | eager (ms) | routed (ms) | speedup | KV blob | fetch+deserialize | generate |
+|----------------|--------:|--:|-----------:|------------:|--------:|--------:|------------------:|---------:|
+| Qwen2.5-0.5B   |    1024 | 2 |         54 |          39 |   1.38× |   20 MB |             10 ms |    49 ms |
+| Qwen2.5-0.5B   |    2048 | 2 |         90 |          44 |   2.05× |   39 MB |             17 ms |    49 ms |
+| Qwen2.5-0.5B   |    4096 | 2 |        169 |          51 |   3.31× |   76 MB |             21 ms |    51 ms |
+| Qwen2.5-1.5B   |    1024 | 2 |        112 |          51 |   2.20× |   46 MB |             20 ms |    64 ms |
+| Qwen2.5-1.5B   |    2048 | 2 |        204 |          71 |   2.87× |   90 MB |             36 ms |    64 ms |
+| Qwen2.5-1.5B   |    4096 | 2 |        409 |      **94** | **4.34×** |  178 MB |             55 ms |    70 ms |
 
 All numbers are median over 3 repeats. OOM blocked `N≥3` on Qwen2.5-1.5B
 at these doc lengths on 12 GB (each worker holds its own model copy +
 KV cache).
+
+### Transport comparison at the top config
+
+Same workload (1.5B / 4k tokens / 2 agents / warm-cache), different
+transports between publisher and consumer:
+
+| transport                              | fetch+deserialize | routed total | speedup |
+|----------------------------------------|------------------:|-------------:|--------:|
+| HTTP + safetensors bytes (cross-host)  |            251 ms |       265 ms |   1.54× |
+| Same-host safe_open mmap (local_path)  |             55 ms |        94 ms |   4.34× |
+
+Most of the gap is the bytes round trip: `safe_open` on the local file
+mmap's it and reads tensors directly to the GPU, while the HTTP path
+pays (a) HTTP GET, (b) Python-side `safetensors.torch.load(blob)` which
+materializes every tensor on CPU first, (c) a `.to(device)` copy per
+layer. On cross-host deployments the HTTP path is what we'll use, so
+that 1.54× is the honest LAN-scale number.
 
 ## What the numbers say
 
@@ -53,13 +71,13 @@ KV cache).
   on Qwen2.5-1.5B, full-doc prefill is 400 ms and KV fetch is ~250 ms,
   so we win 1.54×. Bigger models and longer docs widen the gap.
 
-- **The HTTP+safetensors transport is the biggest lever.** On a 178 MB
-  KV blob the resolve+deserialize overhead is 251 ms — that's ~700 MB/s
-  through the pipe, far below localhost's theoretical bandwidth. The
-  CPU round trip (GPU→CPU copy + safetensors parse + CPU→GPU copy) is
-  the bottleneck. A shared-memory or CUDA-IPC transport between
-  same-host workers would collapse this to well under 50 ms and push
-  us close to single-process prefix-cache performance.
+- **Transport choice matters a lot more than the routing layer.** On a
+  178 MB KV blob, HTTP + safetensors bytes took 251 ms (CPU round trip
+  + PCIe upload). The same-host `safe_open` mmap path takes 55 ms.
+  The catalog / bloom lookup / header plumbing costs under 1 ms in
+  both cases. Cross-host deployments that need HTTP will be closer to
+  the first number; cross-process on one box will hit the second.
+  Further wins are possible with CUDA IPC or RDMA between GPU peers.
 
 - **Correctness is bit-exact.** `test_llm_kv_routing.py::test_cross_node_kv_reuse_matches_eager`
   checks that the routed path produces logits within fp tolerance of
