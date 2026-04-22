@@ -1,4 +1,34 @@
-# Semantic Cache Routing — Phase-3 Benchmark Results
+# Semantic Cache Routing — Benchmark Results
+
+All numbers on an NVIDIA RTX 3080 Ti (12 GB) running torch 2.10 +
+vLLM 0.19 + Apache Pulsar 3.1 in Docker. Every experiment is fully
+reproducible; scripts are under `scripts/` and `tests/`.
+
+## Headline numbers (TL;DR)
+
+**End-to-end: vLLM instances sharing KV via EdgeServeKVConnector.**
+Consumer's vLLM has no local prefix cache for the prompt — the connector
+finds and loads it from a seeder's EdgeServe `SemanticCacheClient` via
+Pulsar discovery + HTTP (same-host: safetensors mmap).
+
+| scenario | model | consumers | speedup | correct | script |
+|----------|-------|----------:|--------:|:-------:|--------|
+| 2-stage same prompt      | Qwen2.5-0.5B |    1 | 2.47× |  ✓ | `demo_kvconnector_two_stage.py` |
+| 2-stage same prompt      | Qwen2.5-1.5B |    1 | 3.30× |  ✓ | same |
+| concurrent same prompt   | Qwen2.5-0.5B |    3 | 2.70× |  ✓ | `demo_kvconnector_concurrent.py` |
+| **prefix share, 1 consumer** | Qwen2.5-0.5B | 1 | **2.61×** | ✓ | `demo_kvconnector_prefix_share.py` |
+| **multi-agent, 5 consumers** | Qwen2.5-0.5B | 5 | **3.09×** | ✓ | `demo_kvconnector_multi_agent.py` |
+| multi-agent, 3 consumers | Qwen2.5-1.5B |    3 | 2.98× |  ✓ | same |
+
+The prefix-share and multi-agent rows are the scenario the paper
+motivates: **different agents with different personas/queries sharing
+a document prefix**, hitting the same cache via prefix-boundary hashes.
+Correctness means the warm path's next-token id equals the no-cache
+path's next-token id (bit-exact through the safetensors round trip).
+
+---
+
+## Setup
 
 Numbers from `tests/phase3_multiproc_bench.py` on an NVIDIA RTX 3080 Ti
 (12 GB, driver 550 / CUDA 12.8), torch 2.10, transformers 5.5, with a
