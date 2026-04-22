@@ -137,34 +137,41 @@ that 1.54× is the honest LAN-scale number.
 
 ## Single-process engine ceiling (vLLM prefix cache)
 
+> ⚠ **Honesty note on this table.** The `vllm-prefix` column below
+> submits all N prompts in ONE `llm.generate(prompts=[...])` call; vLLM
+> batches them via continuous batching. The `hf-eager` column runs the
+> same prompts via a Python for-loop, one at a time. So the 14–49×
+> gap conflates THREE speedup sources: (a) vLLM's radix prefix cache,
+> (b) FlashAttention-2 + PagedAttention kernels, (c) continuous
+> batching vs sequential dispatch. It is NOT a clean "prefix cache
+> alone" number. Read it as "what a single vLLM process can do on
+> this workload, vs a naive HF dispatch loop."
+
 `scripts/bench_engines.py` runs the same workload through a single vLLM
-instance with `enable_prefix_caching=True`. This is the ceiling that any
-cross-process / cross-node scheme has to approach.
+instance with `enable_prefix_caching=True`.
 
 On Qwen2.5-1.5B / bf16 / 3080 Ti / 1 new token:
 
-| agents | doc tok | hf-eager | hf-oracle | **vllm-prefix** | vllm vs eager |
-|-------:|--------:|---------:|----------:|----------------:|--------------:|
-|      2 |    2048 |    265 ms |    171 ms |        **19 ms** |        13.4× |
-|      2 |    4096 |    517 ms |    305 ms |        **25 ms** |        20.4× |
-|      4 |    2048 |    518 ms |    207 ms |        **23 ms** |        23.0× |
-|      4 |    4096 |  1 032 ms |    345 ms |        **21 ms** |        49.0× |
-|      8 |    2048 |  1 036 ms |    276 ms |        **31 ms** |        34.0× |
-|      8 |    4096 |  2 064 ms |    427 ms |        **42 ms** |        48.6× |
+| agents | doc tok | hf-eager (seq) | hf-oracle (seq, PKV reuse) | vllm-prefix (batched) | vllm vs hf-eager |
+|-------:|--------:|---------------:|---------------------------:|----------------------:|-----------------:|
+|      2 |    2048 |         265 ms |                     171 ms |                 19 ms |           13.4× |
+|      2 |    4096 |         517 ms |                     305 ms |                 25 ms |           20.4× |
+|      4 |    2048 |         518 ms |                     207 ms |                 23 ms |           23.0× |
+|      4 |    4096 |       1 032 ms |                     345 ms |                 21 ms |           49.0× |
+|      8 |    2048 |       1 036 ms |                     276 ms |                 31 ms |           34.0× |
+|      8 |    4096 |       2 064 ms |                     427 ms |                 42 ms |           48.6× |
 
-vLLM wins by 1-2 orders of magnitude over HF even with PKV reuse because
-it also brings FlashAttention-2 kernels, PagedAttention, continuous
-batching, and CUDA graphs. **The `hf-oracle` numbers in the earlier
-table are not a meaningful ceiling.** The ceiling we need to approach is
-vLLM's intra-process prefix cache.
+For an honest **"prefix cache alone"** isolation, see the "Ceiling
+comparison: vLLM internal prefix cache vs EdgeServeKVConnector"
+section below: same prompt run twice on one vLLM instance, with and
+without internal cache — that's where the 2–7× cache-only speedups
+live.
 
-This reframes what EdgeServe's Semantic Cache Routing must do to be
-useful: **wrap vLLM (or equivalent) as the inference engine so we
-inherit its kernel/batching wins**, then layer cross-process/cross-node
-cache routing on top via a custom `vllm.KVConnectorBase_V1`. Wrapping
-vLLM just as a tokens-in/tokens-out runner (as `VLLMEngine` does today)
-keeps its single-process radix cache intact; we still need the
-connector work to extend that across processes.
+The correct takeaway from the table above: **wrap vLLM (or similar)
+as the inference engine so we inherit its kernel/batching wins**, then
+layer cross-process cache sharing on top via our KVConnector. `VLLMEngine`
+wraps vLLM; `EdgeServeKVConnector` extends its cache across processes.
+Both landed.
 
 ## What this run does NOT demonstrate
 
