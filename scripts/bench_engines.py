@@ -223,7 +223,12 @@ def main():
             torch.cuda.synchronize()
         hf_loaded = True
 
-    for name in selected:
+    # Run HF engines first while hf_model is loaded; free it BEFORE any vLLM /
+    # SGLang engine spins up, otherwise they collide on GPU memory.
+    hf_engines = [e for e in selected if e.startswith('hf-')]
+    other_engines = [e for e in selected if not e.startswith('hf-')]
+
+    for name in hf_engines:
         times = []
         print(f'\n[{name}] running {args.repeats} repeats...')
         try:
@@ -234,27 +239,8 @@ def main():
                 elif name == 'hf-oracle':
                     t = bench_hf_oracle(hf_model, tok, doc_ids, suffixes,
                                         args.max_new_tokens, args.device)
-                elif name == 'vllm-prefix':
-                    out = bench_vllm_prefix(args.model, {'fp32': 'float32',
-                                                          'fp16': 'float16',
-                                                          'bf16': 'bfloat16'}[args.dtype],
-                                            doc_ids, suffixes,
-                                            args.max_new_tokens, args.gpu_memory_utilization)
-                    t = out['time_s']
-                    # vLLM LLM loads each call -- expensive; break after one repeat unless
-                    # repeats are cheap. We still record the first number for comparison.
-                    times.append(t)
-                    break
-                elif name == 'sglang-radix':
-                    out = bench_sglang_radix(args.model,
-                                             {'fp32': 'float32', 'fp16': 'float16',
-                                              'bf16': 'bfloat16'}[args.dtype],
-                                             doc_ids, suffixes, args.max_new_tokens)
-                    t = out['time_s']
-                    times.append(t)
-                    break
                 else:
-                    print(f'  unknown engine: {name}')
+                    print(f'  unknown hf engine: {name}')
                     break
                 times.append(t)
         except Exception as e:
@@ -263,10 +249,43 @@ def main():
         if times:
             results[name] = times
 
+    # Free the HF model before vLLM / SGLang claim GPU memory.
     if hf_loaded:
         del hf_model
-        import torch
-        torch.cuda.empty_cache() if args.device == 'cuda' else None
+        import gc
+        gc.collect()
+        if args.device == 'cuda':
+            import torch
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    for name in other_engines:
+        times = []
+        print(f'\n[{name}] running...')
+        try:
+            if name == 'vllm-prefix':
+                out = bench_vllm_prefix(
+                    args.model,
+                    {'fp32': 'float32', 'fp16': 'float16', 'bf16': 'bfloat16'}[args.dtype],
+                    doc_ids, suffixes, args.max_new_tokens,
+                    args.gpu_memory_utilization,
+                )
+                times.append(out['time_s'])
+            elif name == 'sglang-radix':
+                out = bench_sglang_radix(
+                    args.model,
+                    {'fp32': 'float32', 'fp16': 'float16', 'bf16': 'bfloat16'}[args.dtype],
+                    doc_ids, suffixes, args.max_new_tokens,
+                )
+                times.append(out['time_s'])
+            else:
+                print(f'  unknown engine: {name}')
+                continue
+        except Exception as e:
+            print(f'  [{name}] failed: {e}')
+            continue
+        if times:
+            results[name] = times
 
     # Report.
     print('\n=== summary ===')
