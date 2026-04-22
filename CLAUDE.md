@@ -67,6 +67,61 @@ These feed downstream machinery: `log_filter.py` filters interesting records; `l
 - `scheduler.py`, `scheduler_complex.py` — untracked WIP scheduler components.
 - `tests/beam-comp/`, `tests/wandb-comp/` — comparison baselines against Apache Beam and wandb; not part of the core test suite.
 
+## Semantic Cache Routing (the `llm` branch)
+
+The LLM-specific work lives in `edgeserve/semantic_cache/` and
+`edgeserve/inference/`. Key entry points:
+
+- `edgeserve/semantic_cache/` — the core library. Bloom filter
+  (`bloom.py`), header + catalog (via Pulsar), HTTP block transfer, plus
+  a `SemanticCacheClient` that stitches them together. `kv_io.py`
+  handles safetensors round-trips of HuggingFace `past_key_values`.
+- `edgeserve/inference/hf_engine.py`, `vllm_engine.py` — `InferenceEngine`
+  adapters. `VLLMEngine` accepts `kv_transfer_config=...` to plug in
+  `EdgeServeKVConnector`.
+- `edgeserve/inference/vllm_kv_connector.py` — **`vllm.KVConnectorBase_V1`
+  backed by SemanticCacheClient**. Patterns lifted from vLLM's
+  `ExampleConnector` (scheduler hashes prompt prefix, worker
+  gathers/scatters per-layer KV via `slot_mapping`). Registered with
+  vLLM's factory via `register()` or by passing `kv_connector_module_path`
+  in `KVTransferConfig`. See `KV_CONNECTOR.md` in the repo root.
+- `edgeserve/inference/llm_compute.py` — Pulsar-fed LLM operator; not
+  used by any live benchmark today but preserved as the
+  inference-operator primitive mirroring `Compute`.
+
+### Benchmarks (all under `scripts/` or `tests/`)
+
+- `scripts/demo_kvconnector_two_stage.py` — seeder + fresh consumer
+  process, both vLLM + connector. Primary correctness demo.
+- `scripts/demo_kvconnector_concurrent.py` — N persistent live vLLM
+  workers; consumers hit seeder's cache cross-process. Strongest
+  demonstration (see RESULTS.md: 2.7× at 3 workers).
+- `scripts/probe_kvconnector_e2e.py`, `probe_kvconnector_multi.py`,
+  `probe_kvconnector_negative.py` — targeted validation probes.
+- `scripts/bench_engines.py` — single-process baseline harness across
+  HF / vLLM / SGLang (SGLang path skips on Ubuntu 20.04 gcc 9 — needs
+  gcc 10+ for its flashinfer C++20 headers).
+- `tests/phase3_multiproc_bench.py` — legacy multi-process HF benchmark
+  (from before the connector existed); still useful for pure-HF numbers
+  and the `--engine vllm` flag now plumbs through to VLLMEngine.
+- `tests/test_vllm_kv_connector.py`, `test_llm_compute.py`,
+  `test_llm_kv_routing.py` — pytest suite for the LLM stack (requires
+  torch + transformers + vllm installed to run in full).
+
+### Benchmark reproduction boilerplate (GPU box)
+
+```bash
+# Pulsar
+docker run -d --name pulsar -p 6650:6650 -p 8080:8080 \
+  apachepulsar/pulsar:3.1.0 bin/pulsar standalone --no-functions-worker
+
+# Env (in venv with torch+cu128 + vllm 0.19):
+python scripts/demo_kvconnector_concurrent.py \
+  --num-workers 3 --doc-repeats 256 --gpu-mem 0.25
+```
+
 ## Branch convention
 
 The main branch is `pulsar` (not `master`/`main`). Target PRs at `pulsar`.
+The `llm` branch holds all Semantic Cache Routing work and diverges
+significantly from `pulsar`; rebase carefully.
