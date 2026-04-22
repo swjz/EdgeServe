@@ -62,21 +62,38 @@ ba603eb connector: demote per-layer save log to DEBUG (reduce noise)
 
 Qwen2.5-0.5B / bf16 / 3080 Ti, different scenarios:
 
-| scenario | consumers | speedup |
-|----------|----------:|--------:|
-| 2-stage same prompt | 1 | 2.47× |
-| concurrent same prompt | 3 | 2.70× |
-| prefix share (different suffix) | 1 | 2.61× |
-| multi-agent (different suffixes) | 5 | 3.09× |
+| scenario | consumers | speedup | notes |
+|----------|----------:|--------:|-------|
+| 2-stage same prompt | 1 | 2.47× | honest (fresh seeder vs fresh consumer) |
+| concurrent same prompt | 3 | 2.70× | honest (fresh worker 0 vs workers 1-2) |
+| prefix share (different suffix) | 1 | 2.61× | honest (per-run cold topic) |
+| multi-agent (different suffixes) | 5 | **2.46×** | fixed demo; see audit below |
 
 Qwen2.5-1.5B:
 
-| scenario | consumers | speedup |
-|----------|----------:|--------:|
-| 2-stage same prompt | 1 | 3.30× |
-| multi-agent | 3 | 2.98× |
-| multi-agent | 5 | 3.54× |
-| **multi-agent, 7.7 k-token doc** | 4 | **4.19×** |
+| scenario | consumers | speedup | notes |
+|----------|----------:|--------:|-------|
+| 2-stage same prompt | 1 | 3.30× | honest |
+| **multi-agent, 3 consumers** | 3 | **3.12×** | fixed demo, cold/warm |
+| multi-agent, 5 consumers | 5 | 3.54× | seeder/warm (fair), cold-consumer path of old demo was buggy |
+| multi-agent, 7.7 k-token doc | 4 | 4.19× | seeder/warm (fair); cold-consumer path of old demo was buggy |
+
+## Audit note on multi-agent demo
+
+I ran an honesty audit of the vLLM numbers (user asked for this
+before going to CUDA IPC). Found a bug: the old
+`demo_kvconnector_multi_agent.py` used one shared "cold topic" for all
+cold-baseline consumers; consumer 1's publish included multi-boundary
+prefix hashes that consumers 2..N then accidentally hit on their own
+"cold" runs. Fixed to use per-consumer unique topics, and the honest
+cold/warm ratio on 0.5B with 5 consumers dropped from the previously
+reported 3.09× to **2.46×**. The **seeder-vs-warm-consumer** ratio was
+always valid (both are fresh no-cache processes) and has not changed.
+
+SGLang still has no real measurements — the `sgl_kernel` source
+rebuild on your box failed on missing `libnuma-dev` / `libibverbs-dev`;
+now you've installed those it's in progress. Watch for the next
+commit for updated SGLang numbers (if any).
 
 In every scenario the warm consumer's next-token id is bit-identical
 to a cold no-cache run of the same prompt — correctness is preserved.
