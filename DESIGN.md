@@ -279,6 +279,23 @@ Not built (the ordered gap list):
   internet for small-medium models. Target is LAN.
 - **Replacing vLLM's scheduler.** We plug into vLLM's existing
   KVConnector interface; we don't rewrite paging.
+- **"Permuted persona" KV sharing is fundamentally infeasible — not a
+  non-goal but a non-possibility.** Under causal attention with RoPE
+  (standard in all production transformers), the KV at position `j`
+  depends on every preceding token's content AND on position `j`
+  itself. Two prompts `persona_A + doc` and `persona_B + doc` — even
+  when the doc segment is byte-identical — produce KV values at each
+  doc-position that differ, because the doc tokens attend to a
+  different persona *and* occupy different positions if the personas
+  are different lengths. Our entity-tag matching therefore can ONLY
+  share KV when the content preceding the shared segment is
+  identical; in practice this is "doc as prefix, question as
+  suffix." The paper chapter's pitch of arbitrary persona
+  permutation is hand-wavy in the transformer sense; achieving it
+  would require architecture changes (position-agnostic KV like
+  PromptCache, attention-sinks, or KV-adjustment post-hoc) that are
+  out of scope for this work. This is why our demos structure prompts
+  as `doc + suffix_X`, not `persona_X + doc`.
 
 ---
 
