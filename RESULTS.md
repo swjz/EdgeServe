@@ -84,6 +84,37 @@ that 1.54× is the honest LAN-scale number.
   the eager path on the same suffix. The transport round trip is
   lossless.
 
+## Single-process engine ceiling (vLLM prefix cache)
+
+`scripts/bench_engines.py` runs the same workload through a single vLLM
+instance with `enable_prefix_caching=True`. This is the ceiling that any
+cross-process / cross-node scheme has to approach.
+
+On Qwen2.5-1.5B / bf16 / 3080 Ti / 1 new token:
+
+| agents | doc tok | hf-eager | hf-oracle | **vllm-prefix** | vllm vs eager |
+|-------:|--------:|---------:|----------:|----------------:|--------------:|
+|      2 |    2048 |    265 ms |    171 ms |        **19 ms** |        13.4× |
+|      2 |    4096 |    517 ms |    305 ms |        **25 ms** |        20.4× |
+|      4 |    2048 |    518 ms |    207 ms |        **23 ms** |        23.0× |
+|      4 |    4096 |  1 032 ms |    345 ms |        **21 ms** |        49.0× |
+|      8 |    2048 |  1 036 ms |    276 ms |        **31 ms** |        34.0× |
+|      8 |    4096 |  2 064 ms |    427 ms |        **42 ms** |        48.6× |
+
+vLLM wins by 1-2 orders of magnitude over HF even with PKV reuse because
+it also brings FlashAttention-2 kernels, PagedAttention, continuous
+batching, and CUDA graphs. **The `hf-oracle` numbers in the earlier
+table are not a meaningful ceiling.** The ceiling we need to approach is
+vLLM's intra-process prefix cache.
+
+This reframes what EdgeServe's Semantic Cache Routing must do to be
+useful: **wrap vLLM (or equivalent) as the inference engine so we
+inherit its kernel/batching wins**, then layer cross-process/cross-node
+cache routing on top via a custom `vllm.KVConnectorBase_V1`. Wrapping
+vLLM just as a tokens-in/tokens-out runner (as `VLLMEngine` does today)
+keeps its single-process radix cache intact; we still need the
+connector work to extend that across processes.
+
 ## What this run does NOT demonstrate
 
 - **Cross-host speedup.** All workers here share one GPU + localhost.
@@ -91,13 +122,16 @@ that 1.54× is the honest LAN-scale number.
   much slower. A follow-up on LAN (Mac Mini ↔ 3080 Ti) would quantify
   this honestly.
 
-- **vLLM / SGLang comparison.** The `prefix-oracle` baseline in the
-  single-process `benchmark_kv_routing.py` serves as a proxy for what a
-  single-node vLLM/SGLang prefix cache achieves — hitting 5.65× speedup
-  at 16 agents / 4k tokens. That's what a single-node engine beats us
-  on today. Our value is that we scale past one node while staying near
-  that ceiling; demonstrating this needs the multi-GPU / multi-host
-  setup, which is the next phase.
+- **EdgeServe routing on top of vLLM.** The Phase-3 numbers above use
+  `HFEngine`; the raw per-agent prefill is much slower than vLLM. A
+  proper cross-engine run needs a `vllm.KVConnectorBase_V1`
+  implementation that plugs `SemanticCacheClient` into vLLM's save/load
+  hooks. Scoped on the roadmap; it's the headline follow-up.
+
+- **SGLang comparison.** sglang 0.5+ JIT-compiles kernels that need a
+  C++20-capable compiler; the 3080 Ti box here has only gcc 9 without
+  sudo. The hook in `bench_engines.py` is ready; rerun it on a box with
+  a modern toolchain to get numbers.
 
 - **Concurrent request scheduling.** All agents run sequentially through
   the GPU in this benchmark. Under vLLM-style continuous batching, the

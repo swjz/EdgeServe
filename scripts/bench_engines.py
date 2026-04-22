@@ -140,10 +140,14 @@ def bench_vllm_prefix(model_id, dtype, doc_ids, suffixes, max_new, gpu_mem) -> d
 def bench_sglang_radix(model_id, dtype, doc_ids, suffixes, max_new) -> dict:
     """Run the same workload through sglang's offline Engine.
 
-    RadixAttention (sglang's prefix cache equivalent) is ON by default
-    (`disable_radix_cache=False`); we leave it that way. Memory is kept
-    modest via `mem_fraction_static` so sglang doesn't fight HF for VRAM
-    when both engines are benched in the same invocation.
+    RadixAttention (sglang's prefix cache equivalent) is ON by default.
+
+    Caveat: sglang 0.5+ JIT-compiles CUDA kernels via flashinfer / sgl_kernel
+    that `#include <concepts>` -- a C++20 header. Ubuntu 20.04 ships gcc 9.x
+    which doesn't have it. If the underlying box only has gcc 9 and sudo is
+    not available, sglang will fail on first `.generate()` with
+    `fatal error: concepts: No such file or directory`. Install gcc-11+
+    (apt, conda, or spack) and re-run.
     """
     from sglang.srt.entrypoints.engine import Engine
 
@@ -152,11 +156,8 @@ def bench_sglang_radix(model_id, dtype, doc_ids, suffixes, max_new) -> dict:
         dtype=dtype,
         mem_fraction_static=0.5,
         log_level='error',
-        # Triton attention backend avoids sglang's flashinfer JIT which needs
-        # a C++20 compiler not present on Ubuntu 20.04 (gcc 9). Slower than
-        # flashinfer but installable on any box with CUDA + triton.
         attention_backend='triton',
-        disable_cuda_graph=True,  # sidestep graph capture on older CUDA setups
+        disable_cuda_graph=True,
     )
     try:
         sp = {'max_new_tokens': max_new, 'temperature': 0.0}
