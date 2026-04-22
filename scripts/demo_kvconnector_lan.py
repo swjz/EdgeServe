@@ -15,9 +15,17 @@ Two sub-commands:
   seed    — run on the GPU box: generate + publish KV, then keep the
             HTTP server alive until ^C.
   consume — run on the Mac Mini (or any remote): connect to Pulsar,
-            resolve the blob by doc_id entity tag, measure fetch time.
-  bench   — run on the consumer: sweep blob sizes (seeder must already
-            be running with --doc-repeats values that match).
+            resolve the blob by prefix-hash (derived from the same
+            document text), measure fetch time.
+
+Discovery strategy
+------------------
+The seeder publishes multi-boundary prefix hashes in the bloom filter.
+The consumer tokenizes the same document (same model + same doc-repeats)
+and probes each block-boundary prefix hash, descending from longest.
+If transformers / torch are not available on the consumer, pass
+--prefix-hash XXXX (printed by seeder with --print-hash) to skip
+tokenization.
 
 Usage
 -----
@@ -28,10 +36,12 @@ GPU box (seeder, run first):
       --pulsar-url pulsar://localhost:6650 \\
       --gpu-mem 0.5
 
-Mac Mini (consumer, after seeder prints "header published"):
+Mac Mini (consumer, after seeder prints "KV published"):
   python scripts/demo_kvconnector_lan.py consume \\
       --pulsar-url pulsar://192.168.1.214:6650 \\
-      --doc-id doc_id:XXXX  (printed by seeder)
+      --topic kvcache-lan-XXXX \\
+      --model Qwen/Qwen2.5-1.5B \\
+      --doc-repeats 256
 """
 from __future__ import annotations
 
@@ -126,6 +136,26 @@ if __name__ == '__main__':
     subprocess.run([PYTHON, path])
 
 
+def _compute_prefix_hashes(model: str, doc: str, block_size: int = 16) -> list[str]:
+    """Tokenize doc and return all block-boundary prefix hashes, longest first."""
+    import hashlib
+    import torch
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model)
+    token_ids = tok.encode(doc, add_special_tokens=False)
+    n = len(token_ids)
+    # Descend from longest aligned boundary to shortest
+    boundaries = list(range(block_size, n + 1, block_size))
+    hashes = []
+    for b in reversed(boundaries):
+        arr = torch.tensor(token_ids[:b], dtype=torch.long).numpy().tobytes()
+        hashes.append(hashlib.sha256(arr).hexdigest())
+    print(f"  tokenized doc → {n} tokens; "
+          f"{len(hashes)} block-boundary hashes to probe (block_size={block_size})")
+    return hashes
+
+
 def cmd_consume(args):
     """Run on Mac Mini (or any remote): fetch KV from seeder over HTTP."""
     from edgeserve.semantic_cache.client import SemanticCacheClient
@@ -142,18 +172,36 @@ def cmd_consume(args):
         ttl_ms=10 * 60 * 1000,
     )
 
-    print(f"Waiting for header with doc_id={args.doc_id!r} (up to {args.wait}s) ...")
+    # Build the list of entities to probe.
+    # 1. If caller supplied --prefix-hash, use that directly.
+    # 2. Otherwise, tokenize the document and compute all block-boundary hashes.
+    # (Entity-tag lookup is skipped: set_next_request_entities does not cross
+    # the vLLM EngineCore subprocess boundary, so the bloom only has prefix hashes.)
+    if args.prefix_hash:
+        probe_entities = [args.prefix_hash]
+        print(f"Using supplied prefix hash: {args.prefix_hash}")
+    else:
+        doc = DOC_CHUNK * args.doc_repeats
+        prompt = doc + ' Summarise the key points.'
+        print(f"Tokenizing document ({len(prompt)} chars) to build prefix-hash probes ...")
+        probe_entities = _compute_prefix_hashes(args.model, prompt)
+
+    print(f"Waiting for a matching header (up to {args.wait}s) ...")
     deadline = time.time() + args.wait
     header = None
     while time.time() < deadline:
-        hits = list(client.catalog.lookup([args.doc_id]))
-        if hits:
-            header = hits[0]
+        for entity in probe_entities:
+            hits = list(client.catalog.lookup([entity]))
+            if hits:
+                header = hits[0]
+                print(f"  matched on entity={entity[:16]}...")
+                break
+        if header is not None:
             break
         time.sleep(1.0)
 
     if header is None:
-        print(f"[ERROR] no header found for {args.doc_id!r} within {args.wait}s")
+        print(f"[ERROR] no header found within {args.wait}s")
         client.close()
         return
 
@@ -212,8 +260,12 @@ def main():
                     help='e.g. pulsar://192.168.1.214:6650')
     cp.add_argument('--topic', required=True,
                     help='Pulsar topic (printed by seeder)')
-    cp.add_argument('--doc-id', required=True,
-                    help='Entity tag (printed by seeder)')
+    cp.add_argument('--model', default='Qwen/Qwen2.5-1.5B',
+                    help='Same model as seeder (for tokenization)')
+    cp.add_argument('--doc-repeats', type=int, default=256,
+                    help='Same doc-repeats as seeder')
+    cp.add_argument('--prefix-hash', default='',
+                    help='Exact prefix hash (skip tokenization if known)')
     cp.add_argument('--wait', type=float, default=60.0,
                     help='Seconds to wait for header')
     cp.add_argument('--repeats', type=int, default=5,
