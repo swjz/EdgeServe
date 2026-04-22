@@ -95,6 +95,42 @@ rebuild on your box failed on missing `libnuma-dev` / `libibverbs-dev`;
 now you've installed those it's in progress. Watch for the next
 commit for updated SGLang numbers (if any).
 
+## If resuming on the Ubuntu box
+
+If you migrate to running Claude Code on swjz-ubuntu (see CLAUDE.md
+"Running Claude Code on the GPU box"), pick up exactly here:
+
+1. There's a sgl_kernel source build in progress in
+   `/tmp/tmpq8xz55v4/build/` on swjz-ubuntu. If it succeeded, a wheel
+   should be in `/tmp/sgl_kernel_wheel/`. If not, see the output at
+   `/private/tmp/.../tasks/b0vwnpnxy.output` (Mac) or just re-run:
+
+   ```bash
+   cd ~/sglang-src/sgl-kernel && \
+     CC=/usr/bin/gcc-10 CXX=/usr/bin/g++-10 \
+     CUDACXX=/usr/local/cuda/bin/nvcc \
+     CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH \
+     TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9" \
+     ~/edgeserve-llm/.venv/bin/python -m pip wheel . \
+     --wheel-dir /tmp/sgl_kernel_wheel --no-deps --no-build-isolation
+   ```
+
+2. Once the wheel exists:
+
+   ```bash
+   ~/edgeserve-llm/.venv/bin/pip install /tmp/sgl_kernel_wheel/sgl_kernel-*.whl \
+     --force-reinstall --no-deps
+   cd ~/edgeserve-llm && ~/edgeserve-llm/.venv/bin/python \
+     scripts/bench_engines.py --model Qwen/Qwen2.5-1.5B \
+     --doc-tokens 2048 --num-agents 4 --max-new-tokens 1 \
+     --repeats 2 --engines sglang-radix --gpu-memory-utilization 0.5
+   ```
+
+3. Add the result (or failure mode) to RESULTS.md's headline table
+   and to the Benchmark honesty audit section.
+
+4. Task #18 (CUDA IPC / RDMA) is the remaining research item, deferred.
+
 In every scenario the warm consumer's next-token id is bit-identical
 to a cold no-cache run of the same prompt — correctness is preserved.
 
