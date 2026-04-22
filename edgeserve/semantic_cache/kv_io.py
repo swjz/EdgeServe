@@ -37,15 +37,23 @@ def _as_legacy(past_key_values: Any) -> Tuple[Tuple[Any, Any], ...]:
 
 
 def save_past_key_values(past_key_values: Any) -> bytes:
-    """Serialize `past_key_values` to a safetensors byte string."""
+    """Serialize `past_key_values` to a safetensors byte string.
+
+    Tensors go to CPU in a single batched transfer to minimize PCIe overhead
+    on multi-layer KV caches (tens of layers * 2 tensors each would otherwise
+    cost a launch per layer).
+    """
     from safetensors.torch import save
 
     legacy = _as_legacy(past_key_values)
     flat = {}
     for i, kv in enumerate(legacy):
         k, v = kv[0], kv[1]
-        flat[f'k.{i}'] = k.detach().contiguous().cpu()
-        flat[f'v.{i}'] = v.detach().contiguous().cpu()
+        # .cpu() only if not already on CPU -- avoids a no-op copy for CPU backends.
+        k_cpu = k.detach().contiguous() if k.device.type == 'cpu' else k.detach().contiguous().cpu()
+        v_cpu = v.detach().contiguous() if v.device.type == 'cpu' else v.detach().contiguous().cpu()
+        flat[f'k.{i}'] = k_cpu
+        flat[f'v.{i}'] = v_cpu
     metadata = {'num_layers': str(len(legacy))}
     return save(flat, metadata=metadata)
 
@@ -58,33 +66,26 @@ def load_past_key_values(
     Returns a modern `transformers.DynamicCache` if available (the format
     accepted by HF forward passes as of transformers >=4.36). Set
     `as_cache=False` to force the legacy tuple-of-tuples form.
-    """
-    from safetensors import safe_open
-    import tempfile
-    import os
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.safetensors') as f:
-        f.write(blob)
-        tmp_path = f.name
-    try:
-        with safe_open(tmp_path, framework='pt', device=device) as st:
-            num_layers = int(st.metadata().get('num_layers', 0))
-            if num_layers == 0:
-                num_layers = sum(1 for key in st.keys() if key.startswith('k.'))
-            legacy = tuple(
-                (st.get_tensor(f'k.{i}'), st.get_tensor(f'v.{i}'))
-                for i in range(num_layers)
-            )
-    finally:
-        os.unlink(tmp_path)
+    Fast path: `safetensors.torch.load(blob)` reads directly from bytes
+    (no tempfile), and tensors are moved to `device` with a single .to()
+    per layer. For `device='cuda'` this is one H2D copy, dominated by
+    PCIe bandwidth rather than serialization.
+    """
+    from safetensors.torch import load as st_load
+
+    tensors = st_load(blob)
+    num_layers = sum(1 for key in tensors if key.startswith('k.'))
+    legacy = tuple(
+        (tensors[f'k.{i}'].to(device, non_blocking=True),
+         tensors[f'v.{i}'].to(device, non_blocking=True))
+        for i in range(num_layers)
+    )
 
     if not as_cache:
         return legacy
     try:
         from transformers.cache_utils import DynamicCache
-        # transformers >=4.57 accepts `ddp_cache_data` as the first arg:
-        # an iterable of per-layer (k, v) tuples. Older versions had
-        # DynamicCache.from_legacy_cache(legacy); we avoid depending on it.
         return DynamicCache(legacy)
     except (ImportError, AttributeError, TypeError):
         return legacy
