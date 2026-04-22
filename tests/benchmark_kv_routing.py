@@ -67,14 +67,22 @@ def _pick_device(requested: str) -> str:
     return 'cpu'
 
 
-def _load_model(model_id: str, device: str):
+def _load_model(model_id: str, device: str, dtype_name: str = 'auto'):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_id)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
-    dtype = torch.float32  # keep it simple; users can tweak for GPU bf16/fp16
+    dtype_map = {
+        'fp32': torch.float32, 'float32': torch.float32,
+        'fp16': torch.float16, 'float16': torch.float16, 'half': torch.float16,
+        'bf16': torch.bfloat16, 'bfloat16': torch.bfloat16,
+    }
+    if dtype_name == 'auto':
+        dtype = torch.bfloat16 if device == 'cuda' else torch.float32
+    else:
+        dtype = dtype_map[dtype_name]
     model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
     model.to(device)
     model.eval()
@@ -251,6 +259,9 @@ def main(argv=None):
     parser.add_argument('--num-agents', type=int, default=3)
     parser.add_argument('--device', default='auto',
                         choices=['auto', 'cpu', 'mps', 'cuda'])
+    parser.add_argument('--dtype', default='auto',
+                        choices=['auto', 'fp32', 'fp16', 'bf16'],
+                        help='auto=bf16 on cuda, fp32 elsewhere')
     parser.add_argument('--baselines', default='eager,prefix-oracle,ours',
                         help='comma-separated from eager, prefix-oracle, ours, vllm, sglang')
     parser.add_argument('--repeats', type=int, default=3,
@@ -267,7 +278,7 @@ def main(argv=None):
         print('torch not available; install torch+transformers to run this benchmark')
         return 2
 
-    model, tok = _load_model(args.model, device)
+    model, tok = _load_model(args.model, device, args.dtype)
     doc_ids, suffixes = _build_workload(tok, args.doc_tokens, args.suffix_tokens, args.num_agents)
     doc_ids = doc_ids.to(device)
     suffixes = [s.to(device) for s in suffixes]
