@@ -366,6 +366,32 @@ This is the headline Semantic Cache Routing result: cross-process vLLM
 instances sharing KV for arbitrary agent prompts that happen to share
 a document prefix.
 
+### Ceiling comparison: vLLM internal prefix cache vs EdgeServeKVConnector
+
+vLLM's own `enable_prefix_caching=True` gives the best possible cache
+reuse WITHIN one process — it's essentially free (pointer math in the
+block manager). The interesting question: how much do we pay to go
+cross-process-capable?
+
+`scripts/probe_vllm_internal_vs_connector.py` runs a prompt twice in
+the same vLLM instance, once via internal prefix cache, once via
+EdgeServeKVConnector (with internal cache disabled). Both warm the
+same cache, hit on the second call. Difference = our transport +
+serialization overhead.
+
+Qwen2.5-0.5B / 3080 Ti / 1 new token:
+
+| doc chars | vLLM internal warm | EdgeServeKVConnector warm | overhead |
+|-----------|-------------------:|--------------------------:|---------:|
+|    ~5 k   |            21.2 ms |                   27.5 ms |  +6.3 ms |
+|    ~20 k  |            16.9 ms |                   71.7 ms | +54.9 ms |
+
+Overhead grows with blob size (safetensors decode + H2D copy). At ~5 k
+tokens we're essentially free vs the internal ceiling; at ~20 k tokens
+we pay ~55 ms extra per cache hit but gain cross-process capability
+that the internal cache can't provide. Correctness: both paths produce
+the same warm output token.
+
 Multi-worker vLLM on one 12 GB GPU is memory-tight — each Qwen2.5-1.5B
 instance wants ~4–5 GB (weights + CUDA graphs + KV). Running 2+ vLLM
 workers on one GPU requires careful `--vllm-gpu-mem` tuning or a bigger
