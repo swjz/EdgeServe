@@ -81,14 +81,27 @@ On 3080 Ti / Qwen2.5-1.5B / bf16 / 1 new token:
 See `scripts/demo_kvconnector_two_stage.py` for the reproducer and
 `RESULTS.md` for full methodology.
 
+## Prefix-boundary matching
+
+A consumer whose prompt *shares only a prefix* with a cached entry
+still hits. `wait_for_save` emits entity tags at every block boundary
+of the full prompt:
+
+    hash(tokens[:16]), hash(tokens[:32]), ..., hash(tokens[:L])
+
+all encoded in the same header's bloom filter. The scheduler's
+`get_num_new_matched_tokens` tries hashes longest-first; the first hit
+determines how many tokens the consumer can reuse. `start_load_kv`
+fetches the full blob, slices each layer tensor to the matched length,
+and scatters into the consumer's shorter slot_mapping.
+
+This covers the paper's motivating scenario — multiple agents with
+different personas/queries over the same document hit the shared
+document prefix. See `scripts/demo_kvconnector_prefix_share.py` and
+`scripts/demo_kvconnector_multi_agent.py`.
+
 ## Limitations / future work
 
-- **Exact-prompt matching only.** Two consumers with slightly different
-  prompts (even shared prefix) won't hit each other's cache today. The
-  connector could publish at multiple block-aligned prefix boundaries to
-  enable partial-prefix matching; see `ExampleConnector`'s comment on
-  "cached_prompt + newly_generated_single_token" for the pattern vLLM's
-  own scheduler handles internally.
 - **No per-layer lazy publish.** We accumulate all layers on the
   worker side then publish one blob. For very long contexts on
   memory-tight hosts, per-layer streaming to the SemanticCacheClient
@@ -98,6 +111,10 @@ See `scripts/demo_kvconnector_two_stage.py` for the reproducer and
   worker roles in one vLLM engine share one Pulsar subscription. If a
   single process runs multiple vLLM engines under the same node_id
   with different topics, ensure each has a unique node_id.
+- **CPU round trip on transport.** Today the path is GPU → CPU
+  safetensors bytes → HTTP/mmap → CPU → GPU. Overhead is ~55 ms per
+  ~20 k-token blob on a 3080 Ti. CUDA IPC (same-host) or NCCL/RDMA
+  (cross-host) would drop this to near zero. Tracked on the roadmap.
 
 ## Registration
 
