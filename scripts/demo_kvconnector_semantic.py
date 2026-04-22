@@ -41,11 +41,25 @@ Pulsar must be running on localhost:6650.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+
+# Resolve the Python binary: prefer the venv alongside this repo if we're not
+# already inside it (allows running the script without activating the venv).
+def _find_python() -> str:
+    if sys.prefix != sys.base_prefix:
+        return sys.executable  # already in a venv
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    venv_python = os.path.join(repo_root, '.venv', 'bin', 'python')
+    if os.path.isfile(venv_python):
+        return venv_python
+    return sys.executable
+
+PYTHON = _find_python()
 
 DOC_CHUNK = (
     "The history of artificial intelligence spans decades of research, "
@@ -72,7 +86,6 @@ def _worker_script(
     is_seeder: bool,
     doc_id: str,
     use_entity_lookup: bool,
-    request_id: str,
 ) -> str:
     """Return a self-contained Python script string for one subprocess."""
     mode = "seeder" if is_seeder else "consumer"
@@ -81,43 +94,46 @@ import time, sys
 import torch
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
-from edgeserve.inference.vllm_kv_connector import register, set_request_entities
+from edgeserve.inference.vllm_kv_connector import register, set_next_request_entities
 register()
 
 doc_id_tag = {repr(doc_id)}
-request_id  = {repr(request_id)}
 use_entity  = {use_entity_lookup!r}
 
-ktc = KVTransferConfig(
-    kv_connector='EdgeServeKVConnector',
-    kv_connector_extra_config={{
-        'pulsar_url':       'pulsar://localhost:6650',
-        'topic':            {repr(topic)},
-        'local_cache_path': {repr(cache_path)},
-        'node_id':          {repr(node_id)},
-    }},
-)
-llm = LLM(
-    model={repr(model)},
-    enable_prefix_caching=False,
-    kv_transfer_config=ktc,
-    gpu_memory_utilization={gpu_mem},
-    max_model_len=8192,
-)
+if __name__ == '__main__':
+    ktc = KVTransferConfig(
+        kv_connector='EdgeServeKVConnector',
+        kv_connector_module_path='edgeserve.inference.vllm_kv_connector',
+        kv_role='kv_both',
+        kv_connector_extra_config={{
+            'pulsar_url':       'pulsar://localhost:6650',
+            'topic':            {repr(topic)},
+            'local_cache_path': {repr(cache_path)},
+            'node_id':          {repr(node_id)},
+        }},
+    )
+    llm = LLM(
+        model={repr(model)},
+        enable_prefix_caching=False,
+        kv_transfer_config=ktc,
+        gpu_memory_utilization={gpu_mem},
+        max_model_len=8192,
+    )
 
-prompt = {repr(doc + suffix)}
-params = SamplingParams(max_tokens=1, temperature=0)
+    prompt = {repr(doc + suffix)}
+    params = SamplingParams(max_tokens=1, temperature=0)
 
-# Attach entity tags to the request so both seeder and consumer
-# publish / look up by doc_id.
-set_request_entities(request_id, {{doc_id_tag}})
+    # Attach entity tags so the connector publishes and looks up by doc_id.
+    # Use set_next_request_entities (not set_request_entities) because
+    # LLM.generate() auto-assigns its own request_ids.
+    set_next_request_entities({{doc_id_tag}})
 
-t0 = time.perf_counter()
-out = llm.generate([prompt], params, request_ids=[request_id])
-elapsed = (time.perf_counter() - t0) * 1000
+    t0 = time.perf_counter()
+    out = llm.generate([prompt], params)
+    elapsed = (time.perf_counter() - t0) * 1000
 
-tok = out[0].outputs[0].token_ids[0]
-print(f"[{repr(mode)}] elapsed={elapsed:.1f}ms  token={tok}  entity={doc_id_tag!r}  entity_lookup={use_entity!r}", flush=True)
+    tok = out[0].outputs[0].token_ids[0]
+    print(f"[{repr(mode)}] elapsed={{elapsed:.1f}}ms  token={{tok}}  entity={{doc_id_tag!r}}  entity_lookup={{use_entity!r}}", flush=True)
 """
 
 
@@ -128,7 +144,7 @@ def run_worker(script: str, label: str) -> tuple[float, int]:
     print(f"\n--- {label} ---")
     t0 = time.perf_counter()
     result = subprocess.run(
-        [sys.executable, path], capture_output=False, text=True,
+        [PYTHON, path], capture_output=False, text=True,
     )
     elapsed = (time.perf_counter() - t0) * 1000
     if result.returncode != 0:
@@ -158,7 +174,7 @@ def main():
         model=args.model, doc=doc, suffix=SUFFIXES["historian"],
         topic=topic + "-cold", node_id="cold-0", cache_path=cache_path,
         gpu_mem=args.gpu_mem, is_seeder=False, doc_id=doc_id,
-        use_entity_lookup=False, request_id="cold-req-0",
+        use_entity_lookup=False,
     )
     cold_ms, _ = run_worker(cold_script, "COLD baseline (no cache)")
 
@@ -167,7 +183,7 @@ def main():
         model=args.model, doc=doc, suffix=SUFFIXES["scientist"],
         topic=topic, node_id="seeder-0", cache_path=cache_path,
         gpu_mem=args.gpu_mem, is_seeder=True, doc_id=doc_id,
-        use_entity_lookup=False, request_id="seed-req-0",
+        use_entity_lookup=False,
     )
     seed_ms, _ = run_worker(seed_script, "SEEDER (publish with entity tag)")
 
@@ -180,7 +196,7 @@ def main():
         model=args.model, doc=doc, suffix=SUFFIXES["historian"],
         topic=topic, node_id="consumer-hash", cache_path=cache_path,
         gpu_mem=args.gpu_mem, is_seeder=False, doc_id=doc_id,
-        use_entity_lookup=False, request_id="hash-req-0",
+        use_entity_lookup=False,
     )
     hash_ms, _ = run_worker(consumer_hash_script, "CONSUMER (prefix-hash lookup)")
 
@@ -191,7 +207,7 @@ def main():
         model=args.model, doc=doc, suffix=SUFFIXES["journalist"],
         topic=topic, node_id="consumer-entity", cache_path=cache_path,
         gpu_mem=args.gpu_mem, is_seeder=False, doc_id=doc_id,
-        use_entity_lookup=True, request_id="entity-req-0",
+        use_entity_lookup=True,
     )
     entity_ms, _ = run_worker(consumer_entity_script, "CONSUMER (entity-tag lookup)")
 

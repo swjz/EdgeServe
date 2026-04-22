@@ -91,31 +91,42 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Side-channel: user-declared semantic entity tags per vLLM request.
 #
-# Populated out-of-band before llm.generate() by the agent framework:
-#   from edgeserve.inference.vllm_kv_connector import set_request_entities
+# Two modes:
+#
+# 1. Per-request (AsyncEngine / custom request_id):
 #   set_request_entities("req-42", {"doc_id:wiki_42", "lang:en"})
-#   llm.generate(prompts=[...], request_ids=["req-42"])
+#   # then pass request_id="req-42" via AsyncEngine.generate()
+#
+# 2. Next-request (LLM.generate() which auto-assigns IDs):
+#   set_next_request_entities({"doc_id:wiki_42", "lang:en"})
+#   llm.generate(prompts=[...])   # entities consumed by first request
 #
 # The scheduler picks these up during get_num_new_matched_tokens and includes
 # them in both the bloom publish (so entity-based consumers can find this
 # entry) and the entity-first lookup path (so consumers that declare the same
 # tags hit this entry without needing the exact prefix hash).
 _REQUEST_ENTITIES: dict[str, frozenset[str]] = {}
+_NEXT_REQUEST_ENTITIES: frozenset[str] = frozenset()
 
 
 def set_request_entities(request_id: str, entities: Iterable[str]) -> None:
-    """Attach semantic entity tags to a vLLM request before generate().
-
-    These tags are added to the bloom filter on publish, enabling
-    entity-intersection lookup by consumers that share the same tags (e.g.
-    the same doc_id) even if their prefix hashes differ.
-    """
+    """Attach semantic entity tags to a specific vLLM request_id."""
     _REQUEST_ENTITIES[request_id] = frozenset(entities)
 
 
 def clear_request_entities(request_id: str) -> None:
     """Remove a request's entity tags (called automatically after publish)."""
     _REQUEST_ENTITIES.pop(request_id, None)
+
+
+def set_next_request_entities(entities: Iterable[str]) -> None:
+    """Attach semantic entity tags to the *next* request (any request_id).
+
+    Use this with `LLM.generate()` which auto-assigns request IDs.  The
+    entities are consumed by the first incoming request and then cleared.
+    """
+    global _NEXT_REQUEST_ENTITIES
+    _NEXT_REQUEST_ENTITIES = frozenset(entities)
 
 
 logger = logging.getLogger(__name__)
@@ -337,7 +348,11 @@ class _Scheduler:
             return 0, False
 
         # --- Entity-first path ---
+        global _NEXT_REQUEST_ENTITIES
         user_ents = _REQUEST_ENTITIES.get(request.request_id, frozenset())
+        if not user_ents and _NEXT_REQUEST_ENTITIES:
+            user_ents = _NEXT_REQUEST_ENTITIES
+            _NEXT_REQUEST_ENTITIES = frozenset()  # consume once
         if user_ents:
             hits = self._client.client.catalog.lookup(user_ents)
             if hits:
