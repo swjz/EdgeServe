@@ -503,8 +503,8 @@ class _Worker:
         store_reqs = [r for r in self._connector_metadata.requests if r.is_store]
         if not store_reqs:
             return
-        logger.info('EdgeServe save_kv_layer: %s <- %d store requests',
-                    layer_name, len(store_reqs))
+        logger.debug('EdgeServe save_kv_layer: %s <- %d store requests',
+                     layer_name, len(store_reqs))
         for req in store_reqs:
             layer_attn = attn_metadata.get(layer_name) \
                 if isinstance(attn_metadata, dict) else attn_metadata
