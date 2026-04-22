@@ -482,6 +482,36 @@ This is the headline Semantic Cache Routing result: cross-process vLLM
 instances sharing KV for arbitrary agent prompts that happen to share
 a document prefix.
 
+### Honesty note: prefix-bloom vs semantic-bloom
+
+The paper describes a *semantic* bloom filter that encodes both exact token-prefix
+hashes **and** user-declared entity tags (doc IDs, file paths, etc.), enabling
+cache discovery by semantic metadata even when the exact token prefix is unknown.
+What shipped prior to Task A was prefix-hash-only: the bloom filter encodes only
+the exact hashes at every block boundary; consumers must reconstruct the same
+prefix to find the entry.
+
+**Task A closes this gap.** As of this branch:
+
+- `SemanticCacheClient.publish(entities=..., num_tokens=...)` encodes arbitrary
+  string tags into the bloom filter alongside prefix hashes.
+- `set_request_entities(request_id, {"doc_id:wiki42"})` attaches tags to a
+  vLLM request before `llm.generate()`.
+- The scheduler's `get_num_new_matched_tokens` tries entity-first lookup:
+  `catalog.lookup(user_ents)` → `header.num_tokens` as coverage → direct UUID
+  fetch in `start_load_kv`. No prefix hash recomputation needed on the consumer.
+- `scripts/demo_kvconnector_semantic.py` demonstrates: seeder publishes
+  `doc_id:X` tag; consumer B (same doc, different suffix) finds the entry via
+  entity tag; consumer C (prefix-hash path, as before) also hits.
+
+**What remains aspirational**: the paper's "permuted persona" scenario — where
+persona A's system prompt *precedes* the doc on the seeder and persona B's
+precedes it on the consumer — cannot share KV correctly under causal attention
+with RoPE. KV for doc token j depends on all preceding tokens; persona A ≠ B
+means every doc-position KV differs. The demo uses same-doc-prefix
+different-suffix prompts, which is both correct and the realistic multi-agent
+use case from the paper (§4: "multiple agents querying a shared knowledge base").
+
 ### Ceiling comparison: vLLM internal prefix cache vs EdgeServeKVConnector
 
 vLLM's own `enable_prefix_caching=True` gives the best possible cache

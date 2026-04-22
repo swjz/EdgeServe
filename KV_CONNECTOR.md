@@ -52,6 +52,46 @@ cache HIT, allocates blocks, and `start_load_kv` pulls the blob and
 scatters it into the paged buffer. The forward pass skips the prefill
 work for those tokens.
 
+## Semantic entity tags (Task A)
+
+Beyond prefix-hash matching, requests can declare *semantic entity tags* —
+arbitrary strings like `"doc_id:wiki42"` or `"file:report.pdf"`. These are
+encoded in the publisher's bloom filter alongside the prefix hashes, enabling
+discovery even when the exact token prefix isn't available at lookup time.
+
+```python
+from edgeserve.inference.vllm_kv_connector import register, set_request_entities
+register()
+
+# Before llm.generate(), attach tags to the request:
+request_id = "my-req-001"
+set_request_entities(request_id, {"doc_id:wiki42"})
+out = llm.generate([prompt], sampling_params, request_ids=[request_id])
+```
+
+**Seeder**: `set_request_entities` on the seeder side causes `wait_for_save`
+to merge the declared tags into the bloom filter it publishes. The header then
+encodes both `hash(tokens[:N])` entries AND `"doc_id:wiki42"` — any consumer
+can discover via either path.
+
+**Consumer**: if the consumer calls `set_request_entities` with `"doc_id:wiki42"`,
+the scheduler's `get_num_new_matched_tokens` tries the entity-first lookup
+path first. It queries `catalog.lookup({"doc_id:wiki42"})`, picks the best
+match (ranked by recency), and uses `header.num_tokens` to determine coverage
+without recomputing the prefix hash. The matching block UUID is then passed to
+`start_load_kv` for a direct fetch (bypassing hash lookup entirely).
+
+Lookup order:
+1. **Entity-first**: if `_REQUEST_ENTITIES[request_id]` is non-empty, check
+   the catalog by entity tags. Returns `header.num_tokens` as coverage.
+2. **Prefix-hash fallback**: walk `hash(tokens[:N])` longest-first.
+
+See `scripts/demo_kvconnector_semantic.py` for the end-to-end demo.
+
+`set_request_entities` is thread-safe (Python dict GIL) and auto-cleared
+when the scheduler calls `build_connector_meta` at the end of the prefill
+scheduling step.
+
 ## How it works
 
 - **Key**: the request's aligned prompt token prefix, SHA-256'd

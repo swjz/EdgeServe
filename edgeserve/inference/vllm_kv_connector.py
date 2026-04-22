@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
@@ -87,6 +88,36 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
+# ---------------------------------------------------------------------------
+# Side-channel: user-declared semantic entity tags per vLLM request.
+#
+# Populated out-of-band before llm.generate() by the agent framework:
+#   from edgeserve.inference.vllm_kv_connector import set_request_entities
+#   set_request_entities("req-42", {"doc_id:wiki_42", "lang:en"})
+#   llm.generate(prompts=[...], request_ids=["req-42"])
+#
+# The scheduler picks these up during get_num_new_matched_tokens and includes
+# them in both the bloom publish (so entity-based consumers can find this
+# entry) and the entity-first lookup path (so consumers that declare the same
+# tags hit this entry without needing the exact prefix hash).
+_REQUEST_ENTITIES: dict[str, frozenset[str]] = {}
+
+
+def set_request_entities(request_id: str, entities: Iterable[str]) -> None:
+    """Attach semantic entity tags to a vLLM request before generate().
+
+    These tags are added to the bloom filter on publish, enabling
+    entity-intersection lookup by consumers that share the same tags (e.g.
+    the same doc_id) even if their prefix hashes differ.
+    """
+    _REQUEST_ENTITIES[request_id] = frozenset(entities)
+
+
+def clear_request_entities(request_id: str) -> None:
+    """Remove a request's entity tags (called automatically after publish)."""
+    _REQUEST_ENTITIES.pop(request_id, None)
+
+
 logger = logging.getLogger(__name__)
 # Ensure INFO-level diagnostics land in vLLM's subprocess logs. Without this,
 # our logger only emits at WARNING by default.
@@ -110,6 +141,12 @@ class _ReqSpec:
     token_ids: list[int]        # aligned to block_size
     slot_mapping: torch.Tensor  # flat [num_aligned_tokens]
     is_store: bool
+    # User-declared semantic entity tags for this request (may be empty).
+    # Included in the bloom on publish; used as alternate lookup key on load.
+    user_entities: frozenset[str] = field(default_factory=frozenset)
+    # For entity-based hits: the block UUID the scheduler found, so the worker
+    # can fetch it directly without re-running the bloom lookup.
+    hit_block_uuid: Optional[str] = None
 
 
 class EdgeServeKVMetadata(KVConnectorMetadata):
@@ -253,6 +290,9 @@ class _Scheduler:
         self._matched_len: dict[str, int] = {}
         # Cache to avoid re-hashing in this step
         self._hash_cache: dict[str, str] = {}
+        # request_id -> block UUID str for entity-based hits (scheduler found
+        # the header via entity tags; pass UUID to worker for direct fetch).
+        self._entity_hit_uuid: dict[str, str] = {}
 
     def _req_hash(self, request: "Request", upto: Optional[int] = None) -> str:
         token_ids = list(request.prompt_token_ids or [])
@@ -278,13 +318,17 @@ class _Scheduler:
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int,
     ) -> tuple[Optional[int], bool]:
-        """Find the LONGEST block-aligned prompt prefix in the catalog.
+        """Find the best cached KV for this request.
 
-        Walks from the longest feasible aligned prefix down to one block;
-        returns the first hit's length (in tokens) minus num_computed_tokens.
-        Publishers emit multi-boundary entity tags (see `_Worker.wait_for_save`)
-        so different requests sharing a doc prefix can all hit the same
-        cached entry.
+        Lookup order:
+          1. Entity-first: if the request has user-declared entity tags, check
+             the catalog for any header whose bloom covers ALL declared tags.
+             The header's num_tokens tells us the coverage; we use it directly.
+          2. Prefix-hash fallback: walk block-aligned prefix lengths from
+             longest to shortest, checking the hash at each boundary.
+
+        Publishers emit multi-boundary prefix hashes AND user entity tags so
+        that either path can find the same entry.
         """
         token_ids = list(request.prompt_token_ids or [])
         bs = self._block_size
@@ -292,12 +336,29 @@ class _Scheduler:
         if max_aligned <= num_computed_tokens:
             return 0, False
 
-        # Try longest prefix first. Each candidate length is a multiple of bs.
+        # --- Entity-first path ---
+        user_ents = _REQUEST_ENTITIES.get(request.request_id, frozenset())
+        if user_ents:
+            hits = self._client.client.catalog.lookup(user_ents)
+            if hits:
+                best = hits[0]  # catalog ranks by most-recent
+                n = best.num_tokens
+                if n > num_computed_tokens and n <= max_aligned:
+                    logger.info(
+                        'EdgeServe entity HIT for request %s via tags %s '
+                        '(%d tokens, block %s)',
+                        request.request_id, user_ents, n, best.block_uuid,
+                    )
+                    self._matched_len[request.request_id] = n
+                    self._entity_hit_uuid[request.request_id] = str(best.block_uuid)
+                    return n - num_computed_tokens, False
+
+        # --- Prefix-hash fallback ---
         for n in range(max_aligned, max(num_computed_tokens, bs) - 1, -bs):
             h = _hash_token_ids(token_ids[:n])
             if self._catalog_has(h):
                 logger.info(
-                    'EdgeServe cache HIT for request %s (%d of %d tokens matched)',
+                    'EdgeServe prefix HIT for request %s (%d of %d tokens matched)',
                     request.request_id, n, len(token_ids),
                 )
                 self._matched_len[request.request_id] = n
@@ -343,6 +404,8 @@ class _Scheduler:
                     token_ids=aligned_tokens,
                     slot_mapping=slot,
                     is_store=False,
+                    user_entities=_REQUEST_ENTITIES.get(new_req.req_id, frozenset()),
+                    hit_block_uuid=self._entity_hit_uuid.get(new_req.req_id),
                 ))
                 total_load += 1
             else:
@@ -362,6 +425,7 @@ class _Scheduler:
                         token_ids=aligned_tokens,
                         slot_mapping=slot,
                         is_store=True,
+                        user_entities=_REQUEST_ENTITIES.get(new_req.req_id, frozenset()),
                     ))
                     total_store += 1
 
@@ -396,6 +460,7 @@ class _Scheduler:
         self._requests_need_load.clear()
         self._hash_cache.clear()
         self._matched_len.clear()
+        self._entity_hit_uuid.clear()
         if total_load or total_store:
             logger.info('EdgeServe build_connector_meta: load=%d store=%d',
                         total_load, total_store)
@@ -450,11 +515,24 @@ class _Worker:
         for req in self._connector_metadata.requests:
             if req.is_store:
                 continue
-            hit = self._client.client.resolve({req.request_hash}, timeout=5.0)
+            # Entity hit: scheduler found a header by entity tags; fetch by UUID
+            # directly so we don't need to re-run the bloom query.
+            if req.hit_block_uuid is not None:
+                hit = self._client.client.resolve_by_uuid(
+                    uuid.UUID(req.hit_block_uuid), timeout=5.0,
+                )
+                if hit is not None:
+                    logger.info(
+                        'EdgeServe entity load: block %s (%d tokens)',
+                        req.hit_block_uuid, req.slot_mapping.shape[0],
+                    )
+            else:
+                hit = self._client.client.resolve({req.request_hash}, timeout=5.0)
             if hit is None:
                 logger.warning(
                     'EdgeServe: scheduler said cache HIT but resolve returned None '
-                    '(request_hash=%s)', req.request_hash,
+                    '(request_hash=%s, entity_uuid=%s)',
+                    req.request_hash, req.hit_block_uuid,
                 )
                 continue
 
@@ -517,7 +595,11 @@ class _Worker:
                                  layer_name, e)
                 continue
             entry = self._pending_saves.setdefault(
-                req.request_hash, {'layers': {}, 'token_ids': req.token_ids},
+                req.request_hash, {
+                    'layers': {},
+                    'token_ids': req.token_ids,
+                    'user_entities': req.user_entities,
+                },
             )
             entry['layers'][layer_name] = \
                 kv_slice.detach().cpu().contiguous()
@@ -538,16 +620,24 @@ class _Worker:
         for req_hash, entry in self._pending_saves.items():
             layers = entry.get('layers', {}) if isinstance(entry, dict) else entry
             token_ids = entry.get('token_ids', []) if isinstance(entry, dict) else []
+            user_ents = entry.get('user_entities', frozenset()) if isinstance(entry, dict) else frozenset()
             if not layers:
                 continue
             try:
                 blob = st_save(layers)
                 entities = self._multi_boundary_hashes(token_ids, req_hash)
-                self._client.client.publish(entities, blob)
+                # Also include user-declared semantic tags so entity-based
+                # consumers (those that know the doc_id but not the prefix hash)
+                # can find this entry via bloom intersection.
+                entities |= set(user_ents)
+                self._client.client.publish(
+                    entities, blob, num_tokens=len(token_ids),
+                )
                 logger.info(
                     'EdgeServe: published KV for hash=%s (%d layers, %.2f MB, '
-                    '%d prefix tags)',
-                    req_hash, len(layers), len(blob) / 1e6, len(entities),
+                    '%d prefix tags, %d entity tags)',
+                    req_hash, len(layers), len(blob) / 1e6,
+                    len(entities) - len(user_ents), len(user_ents),
                 )
             except Exception as e:
                 logger.exception('EdgeServe publish failed: %s', e)

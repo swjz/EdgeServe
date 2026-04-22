@@ -169,3 +169,75 @@ def test_multi_boundary_hashes_produces_every_block_boundary():
     assert _hash_token_ids(tokens[:4]) in entities
     assert _hash_token_ids(tokens[:8]) in entities
     assert len(entities) == 3
+
+
+def test_set_request_entities_side_channel():
+    """set_request_entities / clear_request_entities manage the module-level dict."""
+    from edgeserve.inference.vllm_kv_connector import (
+        set_request_entities, clear_request_entities, _REQUEST_ENTITIES,
+    )
+    set_request_entities('r1', {'doc:foo', 'doc:bar'})
+    assert _REQUEST_ENTITIES['r1'] == frozenset({'doc:foo', 'doc:bar'})
+    clear_request_entities('r1')
+    assert 'r1' not in _REQUEST_ENTITIES
+
+
+def test_entity_first_scheduler_path():
+    """Scheduler finds a catalog hit by entity tags and returns num_tokens."""
+    import uuid
+    from edgeserve.inference.vllm_kv_connector import (
+        _Scheduler, set_request_entities, clear_request_entities,
+    )
+    from edgeserve.semantic_cache.bloom import SemanticBloomFilter
+    from edgeserve.semantic_cache.header import CacheHeader
+
+    DOC_TAG = 'doc_id:wiki42'
+    REQUEST_ID = 'entity-test-req'
+    NUM_TOK = 64
+
+    # Build a fake header whose bloom encodes DOC_TAG and num_tokens=64
+    bloom = SemanticBloomFilter.for_capacity(128)
+    bloom.add(DOC_TAG)
+    fake_uuid = uuid.uuid4()
+    header = CacheHeader(
+        block_uuid=fake_uuid,
+        node_uri='http://localhost:9999',
+        prefix_hash=b'',
+        bloom=bloom,
+        num_tokens=NUM_TOK,
+    )
+
+    # Wire a fake client whose catalog returns that header for any entity query
+    class FakeCatalog:
+        def lookup(self, entities):
+            if DOC_TAG in entities:
+                return [header]
+            return []
+
+    class FakeClientInner:
+        catalog = FakeCatalog()
+
+    class FakeClientWrapper:
+        client = FakeClientInner()
+
+    sched = object.__new__(_Scheduler)
+    sched._client = FakeClientWrapper()
+    sched._block_size = 16
+    sched._matched_len = {}
+    sched._hash_cache = {}
+    sched._entity_hit_uuid = {}
+
+    class FakeRequest:
+        request_id = REQUEST_ID
+        prompt_token_ids = list(range(80))  # 80 tokens, aligned max = 64
+        num_computed_tokens = 0
+
+    set_request_entities(REQUEST_ID, {DOC_TAG})
+    try:
+        n_matched, load_async = sched.get_num_new_matched_tokens(FakeRequest(), 0)
+    finally:
+        clear_request_entities(REQUEST_ID)
+
+    assert n_matched == NUM_TOK, f"expected 64, got {n_matched}"
+    assert sched._matched_len[REQUEST_ID] == NUM_TOK
+    assert sched._entity_hit_uuid[REQUEST_ID] == str(fake_uuid)

@@ -47,12 +47,15 @@ class SemanticCacheClient:
         entities: Iterable[str],
         data: bytes,
         prefix_tokens: Optional[bytes] = None,
+        num_tokens: int = 0,
     ) -> uuid.UUID:
         """Store `data` locally, then broadcast a header describing it.
 
         `entities` are semantic tags (doc IDs, function names, file paths, etc.)
         that agents will later query against. `prefix_tokens`, if given, is
-        SHA-256'd for the exact-match fallback hash.
+        SHA-256'd for the exact-match fallback hash. `num_tokens` records how
+        many prompt tokens the KV blob covers so entity-based consumers can
+        correctly size their slot allocation without parsing the blob.
         """
         block_uuid = uuid.uuid4()
         local_path = self.http.write_block(str(block_uuid), data)
@@ -69,12 +72,35 @@ class SemanticCacheClient:
             bloom=bloom,
             hostname=socket.gethostname(),
             local_path=os.path.abspath(local_path),
+            num_tokens=num_tokens,
         )
         self.publisher.publish(header)
         # Seed local catalog immediately so same-node resolve() works without
         # waiting for the subscription round trip.
         self.catalog.insert(header)
         return block_uuid
+
+    def resolve_by_uuid(
+        self, block_uuid: uuid.UUID, timeout: float = 5.0,
+    ) -> Optional[Tuple[bytes, CacheHeader]]:
+        """Fetch a specific block by its UUID, bypassing bloom lookup.
+
+        Used when the scheduler has already identified the matching header via
+        entity-based lookup and passes the block UUID directly to the worker.
+        """
+        with self.catalog._lock:
+            header = self.catalog._headers.get(block_uuid)
+        if header is None:
+            return None
+        try:
+            if self._is_local_readable(header):
+                with open(header.local_path, 'rb') as f:
+                    return f.read(), header
+            from edgeserve.semantic_cache.http_client import http_fetch
+            data = http_fetch(header.node_uri, header.block_uuid, timeout=timeout)
+            return data, header
+        except Exception:
+            return None
 
     def resolve(
         self, entities: Iterable[str], timeout: float = 5.0

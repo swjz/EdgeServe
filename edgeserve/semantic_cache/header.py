@@ -22,6 +22,10 @@ class CacheHeader:
     # still usable over HTTP.
     hostname: Optional[str] = None
     local_path: Optional[str] = None
+    # Number of prompt tokens whose KV this blob covers (block-aligned).
+    # Required for entity-based hits where the consumer can't infer coverage
+    # from its own prompt structure. Zero means unknown (legacy header).
+    num_tokens: int = 0
 
     def to_bytes(self) -> bytes:
         d = {
@@ -30,6 +34,7 @@ class CacheHeader:
             'prefix_hash': self.prefix_hash,
             'bloom': self.bloom.to_bytes(),
             'created_ms': self.created_ms,
+            'num_tokens': self.num_tokens,
         }
         if self.hostname is not None:
             d['hostname'] = self.hostname
@@ -48,4 +53,5 @@ class CacheHeader:
             created_ms=d['created_ms'],
             hostname=d.get('hostname'),
             local_path=d.get('local_path'),
+            num_tokens=d.get('num_tokens', 0),
         )
