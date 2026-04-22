@@ -36,10 +36,28 @@ Pulsar discovery + HTTP (same-host: safetensors mmap).
 | 2-stage same prompt      | Qwen2.5-1.5B |    1 | 3.30× |  ✓ | same |
 | concurrent same prompt   | Qwen2.5-0.5B |    3 | 2.70× |  ✓ | `demo_kvconnector_concurrent.py` |
 | **prefix share, 1 consumer** | Qwen2.5-0.5B | 1 | **2.61×** | ✓ | `demo_kvconnector_prefix_share.py` |
-| **multi-agent, 5 consumers** | Qwen2.5-0.5B | 5 | **3.09×** | ✓ | `demo_kvconnector_multi_agent.py` |
-| multi-agent, 3 consumers | Qwen2.5-1.5B |    3 | 2.98× |  ✓ | same |
-| multi-agent, 5 consumers | Qwen2.5-1.5B |    5 | 3.54× |  ✓ | same |
-| **multi-agent, 4 consumers, 7.7 k-token doc** | Qwen2.5-1.5B | 4 | **4.19×** | ✓ | same |
+| multi-agent, 5 consumers, honest cold | Qwen2.5-0.5B | 5 | **2.46×** | ✓ | `demo_kvconnector_multi_agent.py` |
+| multi-agent, 3 consumers | Qwen2.5-1.5B |    3 | 2.98× † |  ✓ | same |
+| multi-agent, 5 consumers | Qwen2.5-1.5B |    5 | 3.54× † |  ✓ | same |
+| multi-agent, 4 consumers, 7.7 k-token doc | Qwen2.5-1.5B | 4 | 4.19× † |  ✓ | same |
+
+**†** The 2.98× / 3.54× / 4.19× numbers use **seeder gen time** as the
+reference instead of a truly cold consumer run. Before the demo was
+fixed, the "cold consumer" loop shared one topic — consumer 1 published
+multi-boundary prefix hashes that accidentally made consumers 2..N's
+"cold" runs into prefix-cache HITS. The seeder-vs-warm ratio is still
+valid (both pay the same first-generate overhead with no cache to
+load), but the cold-vs-warm ratio in those older runs was inflated.
+The 0.5B row above uses the fixed demo with a UNIQUE topic per cold
+consumer and shows the honest 2.46×. I didn't re-run the 1.5B
+configurations on the fixed demo (each takes ~15 min setup on this
+GPU); the speedups there are in the same 2–4× range depending on
+whether you measure cold-vs-warm or seeder-vs-warm.
+
+The **prefix-sharing speedup is real** in every configuration — every
+warm consumer's next-token id matched a truly-cold reference run (see
+correctness column). The bug was in the cold-baseline measurement
+loop, not the cache-routing mechanics.
 
 The prefix-share and multi-agent rows are the scenario the paper
 motivates: **different agents with different personas/queries sharing
