@@ -152,6 +152,11 @@ def bench_sglang_radix(model_id, dtype, doc_ids, suffixes, max_new) -> dict:
         dtype=dtype,
         mem_fraction_static=0.5,
         log_level='error',
+        # Triton attention backend avoids sglang's flashinfer JIT which needs
+        # a C++20 compiler not present on Ubuntu 20.04 (gcc 9). Slower than
+        # flashinfer but installable on any box with CUDA + triton.
+        attention_backend='triton',
+        disable_cuda_graph=True,  # sidestep graph capture on older CUDA setups
     )
     try:
         sp = {'max_new_tokens': max_new, 'temperature': 0.0}
