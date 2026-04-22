@@ -182,10 +182,24 @@ def run_trial(
         for i in range(1, len(workers)):
             results[i] = _await_result(workers[i], f'worker-{i}')
     else:
-        # For eager with warm_cache, time only workers 1..N so the comparison
-        # is apples-to-apples with routed warm_cache (which also only times
-        # N-1 consumers).
-        time_slice = slice(1, None) if warm_cache else slice(None)
+        if warm_cache:
+            # Apples-to-apples with routed warm_cache: worker 0 is assumed to
+            # have already done its work in a past trial, so skip it entirely.
+            # Only time workers 1..N-1 doing fresh prefills in parallel.
+            t_trial_start = time.perf_counter()
+            for i in range(1, len(workers)):
+                _send(workers[i], {
+                    'cmd': 'run',
+                    'prompt': doc + ' ' + suffixes[i],
+                    'cache_tags': [],
+                    'publish': False,
+                    'max_new_tokens': max_new_tokens,
+                })
+            for i in range(1, len(workers)):
+                results[i] = _await_result(workers[i], f'worker-{i}')
+            total_wall = (time.perf_counter() - t_trial_start) * 1000
+            return {'total_wall_ms': total_wall, 'per_worker': results,
+                    'timed_workers': len(workers) - 1, 'warm_cache': True}
         for i, w in enumerate(workers):
             _send(w, {
                 'cmd': 'run',
@@ -194,20 +208,8 @@ def run_trial(
                 'publish': False,
                 'max_new_tokens': max_new_tokens,
             })
-        if warm_cache:
-            # Toss worker 0's result (it's the "seed" that would have prepopulated
-            # a cache in a routing deployment; its work doesn't count for steady
-            # state). Start the clock after dispatch, stop after N-1 finish.
-            t_trial_start = time.perf_counter()
-            results[0] = _await_result(workers[0], 'worker-0')
-            for i in range(1, len(workers)):
-                results[i] = _await_result(workers[i], f'worker-{i}')
-            total_wall = (time.perf_counter() - t_trial_start) * 1000
-            return {'total_wall_ms': total_wall, 'per_worker': results,
-                    'timed_workers': len(workers) - 1, 'warm_cache': True}
-        else:
-            for i, w in enumerate(workers):
-                results[i] = _await_result(w, f'worker-{i}')
+        for i, w in enumerate(workers):
+            results[i] = _await_result(w, f'worker-{i}')
 
     total_wall = (time.perf_counter() - t_trial_start) * 1000
     return {'total_wall_ms': total_wall, 'per_worker': results,
