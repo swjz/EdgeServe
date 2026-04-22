@@ -58,6 +58,9 @@ def main():
                              'is therefore equivalent to eager today.')
     parser.add_argument('--gpu-memory-utilization', type=float, default=0.4,
                         help='vLLM only; leaves headroom for multiple workers on one GPU')
+    parser.add_argument('--max-model-len', type=int, default=8192,
+                        help='vLLM only; cap the context window so KV cache allocation '
+                             'does not blow past available memory. Must be >= doc+suffix.')
     args = parser.parse_args()
 
     import torch
@@ -77,6 +80,7 @@ def main():
             args.model, device=device, dtype=vllm_dtype,
             enable_prefix_caching=True,
             gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
         )
     else:
         raise ValueError(f'unknown engine {args.engine}')

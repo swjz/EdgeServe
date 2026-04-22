@@ -271,6 +271,7 @@ def main():
                     '--mode', mode,
                     '--engine', args.engine,
                     '--gpu-memory-utilization', str(args.vllm_gpu_mem),
+                    '--max-model-len', str(args.doc_tokens + 512),
                 ]
                 proc = _spawn(cmd, {
                     'EDGESERVE_DEVICE': args.device,
