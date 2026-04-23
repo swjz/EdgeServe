@@ -86,6 +86,12 @@ class HeaderCatalog:
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=2)
+        try:
+            # Delete durable subscription so the next connection with this
+            # name starts from InitialPosition.Earliest (not the acked cursor).
+            self.consumer.unsubscribe()
+        except Exception:
+            pass
         self.client.close()
 
     def __enter__(self):

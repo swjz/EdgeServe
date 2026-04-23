@@ -121,6 +121,24 @@ if __name__ == '__main__':
     print(f'[seeder] elapsed={{elapsed:.1f}}ms  token={{tok}}', flush=True)
     print('[seeder] doc_id=' + {repr(doc_id)}, flush=True)
     print('[seeder] topic=' + {repr(topic)}, flush=True)
+    # Read back the published header from Pulsar to get block_uuid + node_uri
+    import pulsar as _pulsar, uuid as _uuid
+    _pclient = _pulsar.Client({repr(args.pulsar_url)})
+    _consumer = _pclient.subscribe(
+        {repr(topic)}, f'seeder-readback-' + _uuid.uuid4().hex[:8],
+        consumer_type=_pulsar.ConsumerType.Exclusive,
+        initial_position=_pulsar.InitialPosition.Earliest,
+    )
+    try:
+        _msg = _consumer.receive(timeout_millis=5000)
+        import msgpack as _mp
+        _d = _mp.unpackb(_msg.data(), raw=False)
+        print('[seeder] block_uuid=' + _d.get('block_uuid', '?'), flush=True)
+        print('[seeder] node_uri=' + _d.get('node_uri', '?'), flush=True)
+    except Exception as _e:
+        print('[seeder] could not read back header: ' + str(_e), flush=True)
+    finally:
+        _consumer.close(); _pclient.close()
     print('[seeder] KV published — HTTP server running, ^C to stop', flush=True)
     # Keep process alive so HTTP server stays up for consumer
     try:
@@ -160,7 +178,7 @@ def cmd_consume(args):
     """Run on Mac Mini (or any remote): fetch KV from seeder over HTTP."""
     from edgeserve.semantic_cache.client import SemanticCacheClient
 
-    node_id = f"lan-consumer-{uuid.uuid4().hex[:4]}"
+    node_id = f"lan-consumer-{uuid.uuid4().hex[:12]}"
     cache_path = tempfile.mkdtemp(prefix="edgeserve-lan-consume-")
 
     print(f"Connecting to Pulsar at {args.pulsar_url} ...")
@@ -198,22 +216,16 @@ def cmd_consume(args):
             probe_entities = [args.prefix_hash]
             print(f"Using supplied prefix hash: {args.prefix_hash}")
         else:
-            doc = DOC_CHUNK * args.doc_repeats
-            prompt = doc + ' Summarise the key points.'
-            print(f"Tokenizing document ({len(prompt)} chars) to build prefix-hash probes ...")
-            probe_entities = _compute_prefix_hashes(args.model, prompt)
+            probe_entities = []  # empty → matches any header in the topic
 
-        print(f"Waiting for a matching header (up to {args.wait}s) ...")
+        print(f"Waiting for a header on topic {args.topic!r} (up to {args.wait}s) ...")
         deadline = time.time() + args.wait
         header = None
         while time.time() < deadline:
-            for entity in probe_entities:
-                hits = list(client.catalog.lookup([entity]))
-                if hits:
-                    header = hits[0]
-                    print(f"  matched on entity={entity[:16]}...")
-                    break
-            if header is not None:
+            hits = list(client.catalog.lookup(probe_entities))
+            if hits:
+                header = hits[0]
+                print(f"  found header via {'prefix-hash' if probe_entities else 'topic-latest'}")
                 break
             time.sleep(1.0)
 

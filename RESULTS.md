@@ -53,16 +53,20 @@ We tried hard:
 4. Source build needs CMake < 4 (user-side cmake 4.3 vs dlpack
    submodule's `cmake_minimum_required` incompatibility); downgraded
    to 3.31.
-5. Even with all the above + gcc 10 + nvcc 12.4 + `TORCH_CUDA_ARCH_LIST=
-   "8.0;8.6;8.9"`, sgl-kernel v0.5.9 `csrc/` contains files
-   (`es_sm100_mxfp8_blockscaled_group_quant.{cu,cuh}`,
-   `nvfp4_quant_kernels.cu`, `nvfp4_expert_quant.cu`) that use
-   CUDA 12.8-only intrinsics (`__nv_fp8_e8m0`, `cuda::ptx::cp_async_bulk*`).
-   Stripped those from `CMakeLists.txt`.
-6. Rebuild then fails in the next batch of .cu files (activation.cu,
-   fused_add_rms_norm_kernel.cu, rope.cu, pos_enc.cu, etc). Detailed
-   error messages got truncated — but the pattern is clear: sgl-kernel
-   0.5.x is tightly bound to CUDA 12.8+.
+5. Pre-built SM90 wheel (from the v0.3.21 package) loads on SM86 but has
+   an undefined symbol: `es_sm100_mxfp8_blockscaled_grouped_quant`. The
+   SM100 `.cu` stubs were omitted from the SM90 wheel's CMakeLists.
+6. Added C++ stubs for those two symbols and attempted source rebuild
+   targeting only SM86. Even with `THREADS=2`, the nvcc `cicc` processes
+   for `es_fp8_blockwise.cu` alone consumed 4–7 GB of RAM each; four
+   simultaneous processes saturated 32 GB RAM + 2 GB swap, OOM-killing
+   Pulsar and the build. sgl-kernel 0.5.x needs ~60–100 GB RAM to build
+   all kernels.
+
+**Conclusion**: sgl_kernel source build is infeasible on a 32 GB box unless
+single-threaded (which would take ~6–8 hours per rebuild). A pre-built SM86
+wheel from the sgl-kernel maintainers is the only practical path. Skipping
+SGLang comparison; the vLLM numbers stand on their own.
 
 **Unblocking path requires one of:**
 - Upgrade nvcc to 12.8+ on the GPU box (`sudo apt install cuda-toolkit-12-8`
