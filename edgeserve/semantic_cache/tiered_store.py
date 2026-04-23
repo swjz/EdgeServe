@@ -79,6 +79,14 @@ class TieredStore:
 
         self._lock = threading.Lock()
 
+        # Per-operation counters for hit-rate tracking
+        self._hits_l2 = 0
+        self._hits_l3 = 0
+        self._misses = 0
+        self._puts = 0
+        self._evictions_l2 = 0
+        self._evictions_l3 = 0   # tombstones fired
+
         # Background promotion queue: list of (uuid, data) to absorb into L2
         self._promote_queue: list[Tuple[uuid.UUID, bytes]] = []
         self._promote_lock = threading.Lock()
@@ -114,6 +122,7 @@ class TieredStore:
         tier = 'l3'
 
         with self._lock:
+            self._puts += 1
             # Track L3 entry — evict BEFORE incrementing so headroom is consistent
             is_new = block_uuid not in self._l3_access
             self._l3_access[block_uuid] = now_ms
@@ -150,6 +159,7 @@ class TieredStore:
         with self._lock:
             if block_uuid in self._l2:
                 self._l2.move_to_end(block_uuid)
+                self._hits_l2 += 1
                 return self._l2[block_uuid], 'l2'
 
         # L3 check
@@ -161,6 +171,7 @@ class TieredStore:
                 with self._lock:
                     self._l3_access[block_uuid] = time.time() * 1000
                     self._l3_access.move_to_end(block_uuid)
+                    self._hits_l3 += 1
                 # Async promotion to L2
                 if self._promote_thread is not None:
                     with self._promote_lock:
@@ -171,6 +182,8 @@ class TieredStore:
             except OSError:
                 pass
 
+        with self._lock:
+            self._misses += 1
         return None, None
 
     def peek_l2(self, block_uuid: uuid.UUID) -> Optional[bytes]:
@@ -211,14 +224,41 @@ class TieredStore:
                 pass
             found = True
 
-        if found and self.on_tombstone:
-            self.on_tombstone(block_uuid)
+        if found:
+            with self._lock:
+                self._evictions_l3 += 1
+            if self.on_tombstone:
+                self.on_tombstone(block_uuid)
         return found
+
+    def hit_rate_stats(self) -> dict:
+        """Per-operation counters since creation (or last reset_counters())."""
+        with self._lock:
+            total = self._hits_l2 + self._hits_l3 + self._misses
+            return {
+                'total_gets': total,
+                'hits_l2': self._hits_l2,
+                'hits_l3': self._hits_l3,
+                'misses': self._misses,
+                'puts': self._puts,
+                'evictions_l2': self._evictions_l2,
+                'evictions_l3': self._evictions_l3,
+                'hit_rate_l2': self._hits_l2 / total if total else 0.0,
+                'hit_rate_l3': self._hits_l3 / total if total else 0.0,
+                'miss_rate': self._misses / total if total else 0.0,
+            }
+
+    def reset_counters(self) -> None:
+        """Reset all hit/miss/eviction counters to zero."""
+        with self._lock:
+            self._hits_l2 = self._hits_l3 = self._misses = 0
+            self._puts = self._evictions_l2 = self._evictions_l3 = 0
 
     @property
     def stats(self) -> dict:
-        """Snapshot of tier occupancy for monitoring."""
+        """Snapshot of tier occupancy + hit counters."""
         with self._lock:
+            total = self._hits_l2 + self._hits_l3 + self._misses
             return {
                 'l2_entries': len(self._l2),
                 'l2_bytes': self._l2_bytes,
@@ -226,6 +266,13 @@ class TieredStore:
                 'l3_entries': len(self._l3_access),
                 'l3_bytes': self._l3_bytes,
                 'l3_max_bytes': self.l3_max_bytes,
+                'total_gets': total,
+                'hits_l2': self._hits_l2,
+                'hits_l3': self._hits_l3,
+                'misses': self._misses,
+                'hit_rate_l2': self._hits_l2 / total if total else 0.0,
+                'hit_rate_l3': self._hits_l3 / total if total else 0.0,
+                'miss_rate': self._misses / total if total else 0.0,
             }
 
     # ------------------------------------------------------------------
@@ -260,6 +307,7 @@ class TieredStore:
         while self._l2 and self._l2_bytes + headroom > self.l2_max_bytes:
             _, data = self._l2.popitem(last=False)
             self._l2_bytes -= len(data)
+            self._evictions_l2 += 1
 
     def _evict_l3_locked(self, headroom: int) -> list[uuid.UUID]:
         """Evict LRU L3 entries; returns list of tombstoned UUIDs. Lock held."""
@@ -276,6 +324,7 @@ class TieredStore:
             except OSError:
                 pass
             tombstones.append(uid)
+            self._evictions_l3 += 1
         return tombstones
 
     def _promote_to_l2(self, block_uuid: uuid.UUID, data: bytes) -> None:
