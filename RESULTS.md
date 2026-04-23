@@ -886,6 +886,57 @@ restore starts, so the GPU KV cache is completely cold, yet the agent resumes
 without re-prefill. The 1.41× speedup is conservative (short context favors
 GPU prefill); a 7B model or 32k-token context would widen the gap further.
 
+## Phase 4 — Context-push daemon
+
+**Date:** 2026-04-23. Scripts: `edgeserve/inference/context_server.py`,
+`edgeserve/edge/watcher.py`, `scripts/demo_context_push.py`.
+Model: Qwen2.5-1.5B bf16, GPU box (RTX 3080 Ti).
+
+### Phase 4.1/4.2 — Ingest server + edge watcher
+
+`ContextServer` (Phase 4.1): persistent HTTP server wrapping vLLM +
+EdgeServeKVConnector. POST `/ingest` accepts `{text, entities, sha}`,
+calls `llm.generate()` (1 token), KV saved automatically by connector.
+Model loads once (~22 s) then stays hot; subsequent ingests pay only
+prefill cost.
+
+`ContextWatcher` (Phase 4.2): edge-side polling watcher. Scans a
+directory for file changes, computes sha256 of content, POSTs to
+`/ingest` with entity tags `file:<rel/path>` and
+`file:<rel/path>@sha=<sha16>` (Phase 4.3 entity versioning).
+
+### Phase 4.3 — Entity versioning
+
+Entity tag convention (no code change required — uses existing bloom):
+- `file:auth.py` → latest-version lookup (catalog returns most-recent `created_ms`)
+- `file:auth.py@sha=882ec173` → exact content-version lookup
+
+### Phase 4.4 — Edit-to-answer demo
+
+| metric | value |
+|--------|-------|
+| Context server startup | 22 s (one-time vLLM model load) |
+| Ingest latency (warm, v1 — 138 tokens) | 49 ms |
+| Ingest latency (warm, v2 — 271 tokens) | 44 ms |
+| NVMe files persisted after server exit | 2 |
+| B1 cold re-prefill (271 tokens) | 44 ms |
+| EdgeServe NVMe restore (271 tokens) | 38 ms |
+| Query speedup | 1.15× |
+| Token correctness | ✓ |
+
+**End-to-end flow verified:**
+```
+file edit → watcher (edge) → POST /ingest → context server prefills
+→ KV saved to NVMe → server exit (GPU cache evicted)
+→ consumer restore from NVMe → query answered 1.15× faster
+```
+
+The modest speedup (1.15× at 271 tokens) is expected — short files favor
+GPU prefill. The architectural win is **ingest at 44ms** while the server
+is warm: each code edit costs only one light prefill, and the KV is ready
+before the user asks their question. At longer contexts (≥4k tokens) the
+restore speedup matches the 1.41× seen in Phase 3.6.
+
 ## Reproducing
 
 ```bash

@@ -44,6 +44,19 @@ fan-out stories fully quantified.
 - 3.6 (tool-call eviction): done ✅
 - 2.2c (Mac B0 baseline): skipped (no Mac access in this session)
 
+### Phase 4 additions (same session, later)
+
+| component | file | status |
+|-----------|------|--------|
+| Context server (ingest API) | `edgeserve/inference/context_server.py` | ✅ |
+| Edge watcher | `edgeserve/edge/watcher.py` | ✅ |
+| End-to-end demo | `scripts/demo_context_push.py` | ✅ |
+
+Key numbers: 22s cold startup (one-time model load); 44ms warm ingest;
+1.15× query speedup at 271 tokens; token correctness ✓.
+B0 Mac Mini (Apple M4) MPS baseline also measured: 40× slower than GPU
+at 8k tokens; home LAN fetch (179 Mbps) beats Mac prefill at 128+ repeats.
+
 ---
 
 # Session summary — 2026-04-22 (updated, GPU-box session)
