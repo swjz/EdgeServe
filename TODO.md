@@ -157,9 +157,12 @@ Physics sketch (confirmed by 2.2a):
   Python sleep-based rate limiting (no tc/root required). Empirical
   crossover: ~2–3 Gbps (vs analytic 1.54 Gbps; gap = Python HTTP overhead
   ~200ms). Results in RESULTS.md §Phase 2.2b.
-- **2.2c — B0 Mac prefill line (skipped for now).** Requires Mac MPS/CPU
-  access. Numbers can be added if Mac Mini session is available; not
-  blocking for the core thesis.
+- ✅ **2.2c — B0 Mac Mini (MPS) prefill baseline done (2026-04-23).**
+  Qwen2.5-1.5B fp16 on Apple M4 MPS. Key: Mac crossover is 35–195 Mbps
+  (vs GPU box 1.54 Gbps). Home LAN (179 Mbps) beats Mac prefill at 128+
+  repeats (7.7s Mac vs 5.4s LAN fetch → 1.43× for EdgeServe). At 256
+  repeats Mac is 40× slower than GPU box (attention quadratic on MPS). All
+  tokens match. Results in RESULTS.md §Phase 2.2c.
 - **2.2d — Warm-line measurement on live LAN.** Already captured in
   Phase 2.1 table (10.5s median via Python HTTP at 179 Mbps). Documented
   in RESULTS.md combined picture.

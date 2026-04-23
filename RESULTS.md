@@ -619,7 +619,7 @@ integration.
 | node | hardware | role |
 |------|----------|------|
 | GPU box (`swjz-ubuntu`, 192.168.1.214) | RTX 3080 Ti, Python HTTP server | seeder |
-| Mac Mini (`teds-mac-mini`, 192.168.1.185) | Apple M2, no GPU | consumer |
+| Mac Mini (`teds-mac-mini`, 192.168.1.185) | Apple M4, no GPU | consumer |
 
 Seeder ran `demo_kvconnector_lan.py seed` with Qwen2.5-1.5B / 256 doc-repeats
 (8448 prompt tokens). KV blob was published to Pulsar and served over the HTTP
@@ -683,6 +683,49 @@ dramatically by deployment context.
   had a stale subscription cursor issue (Pulsar durable subscriptions remember
   the cursor across reconnects); the direct-fetch path was used for these numbers.
 
+## Phase 2.2c — B0 Mac Mini (Apple M4, MPS) prefill baseline
+
+**Date:** 2026-04-23. Model: Qwen2.5-1.5B fp16, Mac Mini Apple M4.
+Script: inline HuggingFace inference via `torch.mps`. Repeats: 3 (median).
+All tokens match GPU box output (token=576). ✓
+
+| doc-repeats | ~tokens | MPS prefill | tok/s | GPU box B1 | speedup (GPU/Mac) |
+|-------------|--------:|------------:|------:|-----------:|------------------:|
+| 16  |   536 |    623 ms |   860 |   100 ms |  6.2× |
+| 32  | 1 064 |  1 291 ms |   824 |   170 ms |  7.6× |
+| 64  | 2 120 |  2 985 ms |   710 |   310 ms |  9.6× |
+| 128 | 4 232 |  7 734 ms |   547 |   630 ms | 12.3× |
+| 256 | 8 456 | 53 921 ms |   157 | 1 350 ms | 40.0× |
+
+MPS throughput collapses at long context (attention becomes quadratic on MPS;
+GPU uses FlashAttention). At 256 repeats the Mac is **40× slower** than the GPU box.
+
+### Mac crossover: when does LAN fetch beat Mac prefill?
+
+For the Mac Mini, the crossover bandwidth is dramatically lower than for the GPU box:
+
+```
+crossover_bw = blob_MB × 8 / mac_prefill_s
+```
+
+| doc-repeats | ~tokens | blob MB | Mac prefill s | crossover Mbps |
+|-------------|--------:|--------:|--------------:|---------------:|
+| 16  |   536 |  15.1 |  0.62 |  195 Mbps |
+| 32  | 1 064 |  30.3 |  1.29 |  188 Mbps |
+| 64  | 2 120 |  60.6 |  2.99 |  162 Mbps |
+| 128 | 4 232 | 121.1 |  7.73 |  125 Mbps |
+| 256 | 8 456 | 234.9 | 53.92 |   35 Mbps |
+
+**Key finding:** On a Mac Mini (Apple M4), any link faster than ~125–195 Mbps
+beats local MPS prefill at short contexts; at 256 repeats even a 35 Mbps link wins.
+
+Our home LAN (179 Mbps) is **above the crossover for 128+ repeat contexts**:
+- 128 doc-repeats: LAN fetch ~5.4s vs Mac prefill 7.7s → **fetch wins by 1.43×**
+- 256 doc-repeats: LAN fetch ~10.5s vs Mac prefill 53.9s → **fetch wins by 5.1×**
+
+This inverts the GPU story: EdgeServe's CDN model is compelling for edge devices
+with weaker compute (Mac Mini, laptop CPU, Raspberry Pi) even on standard GigE/Wi-Fi.
+
 ## Phase 2.2 — bandwidth-vs-recompute crossover sweep (same-host mmap)
 
 **Date:** 2026-04-23. Model: Qwen2.5-1.5B bf16, GPU box (RTX 3080 Ti).
@@ -734,8 +777,9 @@ regardless of context length. This confirms:
 | scenario | link | fetch vs recompute | verdict |
 |---|---|---|---|
 | Same-host mmap (measured) | ~8 Gbps | 5–14× **faster** | always wins |
-| 10 GbE LAN (≥1.4 Gbps actual) | 1 400+ Mbps | ~1× (break-even) | wins for large context |
+| 10 GbE LAN (≥3 Gbps actual) | 3 000+ Mbps | ~1× (break-even) | wins at ≥3 Gbps |
 | Gigabit Ethernet (179 Mbps actual) | 179 Mbps | **~7–8× slower** | loses on GPU edge |
+| **Mac Mini M4 + 179 Mbps LAN** | 179 Mbps | **1.4–5.1× faster** (128–256 repeats) | **wins — crossover ~125–195 Mbps** |
 | CPU edge (50 tok/s) + 179 Mbps | 179 Mbps | **~15× faster** | always wins |
 | CPU edge + 11 Mbps | 11 Mbps | ~1× (break-even) | wins above 11 Mbps |
 
