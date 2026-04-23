@@ -1,21 +1,35 @@
 import os
 import socket
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from edgeserve.semantic_cache.tiered_store import TieredStore
 
 
 class CacheHttpServer:
-    """Serves cache blocks from `local_cache_path` over HTTP.
+    """Serves cache blocks over HTTP.
 
-    Exposes `GET /cache/<block_uuid>` which streams the file
-    `<local_cache_path>/<block_uuid>.bin`. Zero external deps.
+    Exposes ``GET /cache/<block_uuid>``. With a TieredStore attached, L2
+    (RAM) hits are served directly from bytes; L3 (NVMe) hits fall through
+    to the existing file-streaming path. Without a store the server reads
+    files from ``local_cache_path`` as before.
     """
 
-    def __init__(self, local_cache_path: str, port: int = 0, host: str = '0.0.0.0'):
+    def __init__(
+        self,
+        local_cache_path: str,
+        port: int = 0,
+        host: str = '0.0.0.0',
+        tiered_store: 'Optional[TieredStore]' = None,
+    ):
         self.local_cache_path = local_cache_path
         os.makedirs(local_cache_path, exist_ok=True)
 
         cache_dir = self.local_cache_path
+        store = tiered_store
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -26,6 +40,25 @@ class CacheHttpServer:
                 if '/' in block_id or '..' in block_id:
                     self.send_error(400)
                     return
+
+                # L2 fast path: serve from pinned RAM without any disk I/O
+                if store is not None:
+                    try:
+                        uid = uuid.UUID(block_id)
+                    except ValueError:
+                        self.send_error(400)
+                        return
+                    l2_data = store.peek_l2(uid)
+                    if l2_data is not None:
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/octet-stream')
+                        self.send_header('Content-Length', str(len(l2_data)))
+                        self.send_header('X-Cache-Tier', 'l2')
+                        self.end_headers()
+                        self.wfile.write(l2_data)
+                        return
+
+                # L3 path: stream from NVMe file
                 fpath = os.path.join(cache_dir, block_id + '.bin')
                 if not os.path.isfile(fpath):
                     self.send_error(404)
@@ -34,6 +67,7 @@ class CacheHttpServer:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/octet-stream')
                 self.send_header('Content-Length', str(size))
+                self.send_header('X-Cache-Tier', 'l3')
                 self.end_headers()
                 with open(fpath, 'rb') as f:
                     while True:

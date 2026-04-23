@@ -26,6 +26,9 @@ class CacheHeader:
     # Required for entity-based hits where the consumer can't infer coverage
     # from its own prompt structure. Zero means unknown (legacy header).
     num_tokens: int = 0
+    # Tombstone flag: when True, consumers must remove this UUID from their
+    # catalog rather than indexing it. Set by the tiered store on L3 eviction.
+    deleted: bool = False
 
     def to_bytes(self) -> bytes:
         d = {
@@ -40,6 +43,8 @@ class CacheHeader:
             d['hostname'] = self.hostname
         if self.local_path is not None:
             d['local_path'] = self.local_path
+        if self.deleted:
+            d['deleted'] = True
         return msgpack.packb(d, use_bin_type=True)
 
     @classmethod
@@ -54,4 +59,5 @@ class CacheHeader:
             hostname=d.get('hostname'),
             local_path=d.get('local_path'),
             num_tokens=d.get('num_tokens', 0),
+            deleted=d.get('deleted', False),
         )

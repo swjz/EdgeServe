@@ -51,7 +51,10 @@ class HeaderCatalog:
             try:
                 header = CacheHeader.from_bytes(msg.value())
                 with self._lock:
-                    self._headers[header.block_uuid] = header
+                    if header.deleted:
+                        self._headers.pop(header.block_uuid, None)
+                    else:
+                        self._headers[header.block_uuid] = header
                 self.consumer.acknowledge(msg)
             except Exception:
                 self.consumer.negative_acknowledge(msg)

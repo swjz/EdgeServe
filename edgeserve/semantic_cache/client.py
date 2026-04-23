@@ -2,7 +2,7 @@ import hashlib
 import os
 import socket
 import uuid
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Tuple
 
 from edgeserve.semantic_cache.bloom import SemanticBloomFilter
 from edgeserve.semantic_cache.catalog import HeaderCatalog
@@ -11,14 +11,18 @@ from edgeserve.semantic_cache.http_client import http_fetch
 from edgeserve.semantic_cache.http_server import CacheHttpServer
 from edgeserve.semantic_cache.publisher import HeaderPublisher
 
+if TYPE_CHECKING:
+    from edgeserve.semantic_cache.tiered_store import TieredStore
+
 
 class SemanticCacheClient:
     """Per-node handle that ties together publishing, discovery, and retrieval.
 
     One instance per worker node. Manages:
-      - a local HTTP server serving cache blocks under `local_cache_path`
+      - a local HTTP server serving cache blocks under ``local_cache_path``
       - a Pulsar-backed header publisher for new cache blocks
       - a Pulsar-backed header catalog indexing peers' recent blocks
+      - optionally a TieredStore (L2 RAM + L3 NVMe) with tombstone propagation
     """
 
     def __init__(
@@ -31,16 +35,26 @@ class SemanticCacheClient:
         topic: str = 'kvcache-headers',
         ttl_ms: float = 10 * 60 * 1000,
         bloom_capacity: int = 1024,
+        tiered_store: 'Optional[TieredStore]' = None,
     ) -> None:
         self.node_id = node_id
         self.bloom_capacity = bloom_capacity
+        self._tiered_store = tiered_store
 
-        self.http = CacheHttpServer(local_cache_path, port=http_port, host=http_host)
+        self.http = CacheHttpServer(
+            local_cache_path, port=http_port, host=http_host,
+            tiered_store=tiered_store,
+        )
         self.http.start()
         self.publisher = HeaderPublisher(pulsar_node, topic=topic)
         self.catalog = HeaderCatalog(
             pulsar_node, node_id=node_id, topic=topic, ttl_ms=ttl_ms
         )
+
+        # Wire tombstone callback: when tiered store evicts a block below L3,
+        # publish a deleted header so all catalog subscribers purge the entry.
+        if tiered_store is not None and tiered_store.on_tombstone is None:
+            tiered_store.on_tombstone = self._publish_tombstone
 
     def publish(
         self,
@@ -49,16 +63,18 @@ class SemanticCacheClient:
         prefix_tokens: Optional[bytes] = None,
         num_tokens: int = 0,
     ) -> uuid.UUID:
-        """Store `data` locally, then broadcast a header describing it.
+        """Store ``data`` locally, then broadcast a header describing it.
 
-        `entities` are semantic tags (doc IDs, function names, file paths, etc.)
-        that agents will later query against. `prefix_tokens`, if given, is
-        SHA-256'd for the exact-match fallback hash. `num_tokens` records how
-        many prompt tokens the KV blob covers so entity-based consumers can
-        correctly size their slot allocation without parsing the blob.
+        Routes storage through the TieredStore if one is attached (L2 hot
+        layer + L3 NVMe), otherwise writes directly to ``local_cache_path``.
         """
         block_uuid = uuid.uuid4()
-        local_path = self.http.write_block(str(block_uuid), data)
+
+        if self._tiered_store is not None:
+            self._tiered_store.put(block_uuid, data)
+            local_path = self._tiered_store.get_l3_path(block_uuid)
+        else:
+            local_path = self.http.write_block(str(block_uuid), data)
 
         bloom = SemanticBloomFilter.for_capacity(self.bloom_capacity)
         for e in entities:
@@ -71,7 +87,7 @@ class SemanticCacheClient:
             prefix_hash=prefix_hash,
             bloom=bloom,
             hostname=socket.gethostname(),
-            local_path=os.path.abspath(local_path),
+            local_path=os.path.abspath(local_path) if local_path else None,
             num_tokens=num_tokens,
         )
         self.publisher.publish(header)
@@ -79,6 +95,18 @@ class SemanticCacheClient:
         # waiting for the subscription round trip.
         self.catalog.insert(header)
         return block_uuid
+
+    def _publish_tombstone(self, block_uuid: uuid.UUID) -> None:
+        """Broadcast a deleted=True header so all catalog subscribers purge the entry."""
+        header = CacheHeader(
+            block_uuid=block_uuid,
+            node_uri=self.http.uri,
+            prefix_hash=b'',
+            bloom=SemanticBloomFilter.for_capacity(1),
+            hostname=socket.gethostname(),
+            deleted=True,
+        )
+        self.publisher.publish(header)
 
     def resolve_by_uuid(
         self, block_uuid: uuid.UUID, timeout: float = 5.0,
@@ -94,9 +122,12 @@ class SemanticCacheClient:
             return None
         try:
             if self._is_local_readable(header):
+                if self._tiered_store is not None:
+                    data, _ = self._tiered_store.get(block_uuid)
+                    if data is not None:
+                        return data, header
                 with open(header.local_path, 'rb') as f:
                     return f.read(), header
-            from edgeserve.semantic_cache.http_client import http_fetch
             data = http_fetch(header.node_uri, header.block_uuid, timeout=timeout)
             return data, header
         except Exception:
