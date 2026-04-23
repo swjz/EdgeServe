@@ -133,7 +133,8 @@ if __name__ == '__main__':
         _msg = _consumer.receive(timeout_millis=5000)
         import msgpack as _mp
         _d = _mp.unpackb(_msg.data(), raw=False)
-        print('[seeder] block_uuid=' + _d.get('block_uuid', '?'), flush=True)
+        _buuid = str(_uuid.UUID(bytes=_d['block_uuid']))
+        print('[seeder] block_uuid=' + _buuid, flush=True)
         print('[seeder] node_uri=' + _d.get('node_uri', '?'), flush=True)
     except Exception as _e:
         print('[seeder] could not read back header: ' + str(_e), flush=True)
