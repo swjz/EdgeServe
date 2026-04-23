@@ -3,12 +3,13 @@
 Reorganized around the thesis in `DESIGN.md` (KV-cache CDN for edge
 LLM serving, EdgeServe-v2). Read `DESIGN.md` first.
 
-**Status snapshot:** Phase 1 (entity-keyed discovery) landed in commit
-`6ef919f`. Publisher now encodes user-declared entity tags in the
-bloom alongside prefix hashes; scheduler has an entity-first lookup
-path with prefix-hash fallback; `scripts/demo_kvconnector_semantic.py`
-exercises it end-to-end. **The work pending now is Phase 2+** (real
-measurements + tiered storage + context-push).
+**Status snapshot (2026-04-23):** Phase 1 (entity-keyed discovery)
+and Phase 2.1 (LAN CDN measurements) are complete. Publisher encodes
+user-declared entity tags in the bloom alongside prefix hashes;
+end-to-end LAN HTTP transport confirmed at 165–183 Mbps (7.5–8×
+slower than GPU recompute). **The work pending now is Phase 2.2**
+(bandwidth-vs-recompute crossover benchmark). SGLang is permanently
+blocked on this machine (OOM during compilation; see Honesty threads).
 
 ---
 
@@ -59,19 +60,13 @@ entity tag, different suffix questions. See
 
 Recorded here so future-us doesn't resurrect this scope.
 
-### 1.5 — RESULTS.md rewrite with entity-lookup numbers 🔲 pending
+### 1.5 — RESULTS.md rewrite with entity-lookup numbers ✅ done
 
-Run `scripts/demo_kvconnector_semantic.py` on the GPU box, capture
-the four timings (cold / seeder / consumer-hash / consumer-entity),
-add a **"Semantic entity discovery"** section to RESULTS.md. Update
-the headline TL;DR table with a new row. Retire the "prefix-bloom vs
-semantic-bloom" note from the audit section now that both paths are
-real.
-
-Also: propagate the permuted-persona impossibility into RESULTS.md
-(it lives in DESIGN.md non-goals today but the results doc should
-mention it alongside the numbers — reviewers of the writeup will
-ask).
+`scripts/demo_kvconnector_semantic.py` ran on the GPU box (4-subprocess
+scenario): **3.29× via prefix-hash**, **3.50× via entity-tag**,
+correctness confirmed (token matches cold baseline). Numbers added
+to RESULTS.md and KV_CONNECTOR.md. Permuted-persona impossibility
+noted in RESULTS.md audit section.
 
 ---
 
@@ -79,48 +74,54 @@ ask).
 
 The paper's headline figures. Prove the architecture pays over LAN.
 
-### 2.1 — Two-host deployment on home LAN 🔲 pending
+### 2.1 — Two-host deployment on home LAN ✅ done (2026-04-22)
 
-Mac Mini + 3080 Ti over home LAN. See
-`SESSION_SUMMARY.md` migration section for the exact environment
-setup. Key concrete steps:
+GPU box (3080 Ti) → Mac Mini over home gigabit LAN. Full pipeline
+confirmed: seeder publishes KV via vLLM + connector → Pulsar catalog
+→ Mac Mini consumer discovers via prefix-hash → HTTP fetch.
 
-- Pulsar broker on the GPU box (Docker, already running there).
-- Seeder: GPU box (3080 Ti) running vLLM.
-- Consumer: Mac Mini. Options:
-  - Run vLLM CPU on Mac (slow; probably not worth the compute).
-  - Run `HFEngine` on Mac MPS (works end-to-end, less realistic).
-  - Measure the **transport only** (HTTP fetch + safetensors decode
-    + paged-buffer scatter) on Mac, decouple from actual decode —
-    this isolates the LAN question.
-- Ensure consumer's `CacheHeader.hostname` differs from seeder's so
-  `_is_local_readable()` returns False and the HTTP path fires, not
-  the same-host mmap.
+Key numbers (Qwen2.5-1.5B, 256 doc-repeats = 8448 tokens, 234.9 MB):
 
-Deliverables:
-- `scripts/demo_kvconnector_lan.py` or equivalent.
-- LAN HTTP fetch wall-time for 50–1000 MB blobs, iperf comparison.
-- End-to-end edge-decode wall-time (if running a real engine on Mac).
+| metric | value |
+|--------|-------|
+| LAN throughput | 165–183 Mbps (Python HTTP server) |
+| Median fetch | 10.5–11.4 s |
+| GPU prefill | 1.38 s (3080 Ti) |
+| Fetch / recompute | **~7.5–8× slower** |
+| Crossover threshold | ≥1.05 Gbps actual throughput, or CPU edge |
 
-### 2.2 — Bandwidth-vs-recompute crossover benchmark 🔲 pending
+Bugs fixed along the way: Pulsar subscription cursor (now calls
+`unsubscribe()` on close), entity-tag cross-process gap (consumer uses
+prefix-hash probe instead), seeder readback TypeError (UUID bytes).
 
-The paper's money figure. Sweep:
-- model size: Qwen2.5-0.5B, 1.5B, optionally 3B/7B if fits on edge.
-- context length: 1k, 4k, 16k, 50k tokens.
-- effective link bandwidth: sim with `tc qdisc` / `iproute2 netem`,
-  sweep 100 Mbps / 500 Mbps / 1 Gbps / same-host.
+See `RESULTS.md §Phase 2` for full tables and crossover analysis.
+Script: `scripts/demo_kvconnector_lan.py`.
 
-Two curves per `(model, context)` point: "edge prefills locally" vs
-"edge pulls KV over link." Output: single publication-quality plot
-showing the regime where the architecture wins.
+### 2.2 — Bandwidth-vs-recompute crossover benchmark 🔲 next
 
-Deliverable: `scripts/bench_bandwidth_crossover.py` + numbers /
-figure in RESULTS.md.
+**← Active next task.** The paper's money figure. Mathematical crossover
+for Qwen2.5-1.5B on 3080 Ti: 132 MB/s (1.05 Gbps). Script not yet
+written.
 
-### 2.3 — Update RESULTS.md "Cross-host" section 🔲 pending
+Sweep plan:
+- blob size: vary `--doc-repeats` (16 / 32 / 64 / 128 / 256 repeats
+  → ~530–8448 tokens, ~7–235 MB blobs).
+- optional bandwidth throttle: `tc qdisc netem rate Xmbit` to simulate
+  100 / 500 / 1000 Mbps links.
 
-Today the section is empty placeholder. Fill with the 2.1/2.2
-numbers.
+For each blob size, record:
+1. GPU prefill time (from `demo_kvconnector_lan.py seed` timings).
+2. LAN fetch time (from `consume --repeats 5` median).
+3. Crossover ratio = fetch / prefill.
+
+Deliverable: `scripts/bench_bandwidth_crossover.py` that runs the
+seeder side, then the consumer side (across ssh if needed), prints a
+table, and appends rows to RESULTS.md §Phase 2.2.
+
+### 2.3 — Update RESULTS.md "Cross-host" section ✅ done (2026-04-22)
+
+Phase 2 section in RESULTS.md filled with 2.1 numbers (fetch table,
+crossover analysis). Will expand with 2.2 sweep table once that runs.
 
 ---
 
@@ -243,21 +244,27 @@ in-datacenter solutions" checkbox.
 
 ## Honesty threads to keep tracking
 
-- Phase 1 entity-tag numbers haven't been recorded in RESULTS.md
-  yet. Until 1.5 lands, the existing RESULTS.md numbers are all
-  prefix-hash-only. Don't rephrase them as "semantic routing"
-  results without fresh measurements from the entity-tag demo.
-- Cross-host section of RESULTS.md is empty. The 1.54× "LAN number"
-  currently in RESULTS.md was measured by simulating HTTP on one
-  machine (disabling the same-host fast path), not actual LAN.
-  Until Phase 2.1 runs, treat that as simulation.
+- ~~Phase 1 entity-tag numbers haven't been recorded in RESULTS.md~~
+  ✅ Recorded (task 1.5 done): 3.29× prefix-hash, 3.50× entity-tag,
+  correctness verified.
+- ~~Cross-host section of RESULTS.md is empty~~ ✅ Filled (task 2.1
+  done): real two-host LAN measurements, 165–183 Mbps, 7.5–8× slower
+  than GPU recompute.
+- **Phase 2.2 crossover benchmark is still pending.** The 1.05 Gbps
+  crossover threshold is calculated, not measured. The sweep needs to
+  confirm the crossover curve matches the math.
 - "KV-cache CDN" is aspirational until Phase 3 (tiered storage) +
   Phase 4 (context-push) land. The current code is a single-tier
   distributed cache with read-on-demand; the CDN semantics arrive
   with tiering + origin-push.
-- SGLang is still blocked on CUDA 12.8+ availability on the GPU box.
-  Separate from all phases above; only unblocks on toolkit upgrade
-  or moving to a Hopper machine.
+- **SGLang: permanently blocked on this machine (2026-04-22).**
+  `cicc` (CUDA IR compiler) uses 4–7 GB RAM per `.cu` file; 4
+  simultaneous = 28 GB, OOM-kills Pulsar and itself on the 32 GB box.
+  Pre-built PyPI wheels are SM90/SM100-only and ABI-incompatible with
+  torch 2.x. Unblocking paths: CUDA 12.8 toolkit upgrade (enables
+  pre-built wheels with SM86 support), or Hopper (H100) machine.
+  Do not attempt a source build on this machine without restricting
+  to `THREADS=1` and closing all other processes.
 
 ---
 
@@ -269,6 +276,7 @@ in-datacenter solutions" checkbox.
 | 1.2 | `#24` | completed |
 | 1.3 | `#25` | completed |
 | 1.4 | `#26` | ~~pending~~ retired (infeasible) |
-| 1.5 | `#27` | pending |
-| 2.1 | `#28` | pending |
-| 5.1 | `#18` | pending |
+| 1.5 | `#27` | completed (2026-04-22) |
+| 2.1 | `#28` | completed (2026-04-22) |
+| 2.2 | — | pending (next) |
+| 5.1 | `#18` | pending (deferred) |
