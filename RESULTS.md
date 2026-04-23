@@ -739,6 +739,52 @@ regardless of context length. This confirms:
 | CPU edge (50 tok/s) + 179 Mbps | 179 Mbps | **~15× faster** | always wins |
 | CPU edge + 11 Mbps | 11 Mbps | ~1× (break-even) | wins above 11 Mbps |
 
+## Phase 3.5 — Tier hit rates under Zipfian workload
+
+**Date:** 2026-04-23. Script: `scripts/bench_tier_hit_rates.py`.
+Synthetic blobs (256 KB each), 100 documents, 2000 accesses, Zipf s=1.0.
+Top-5 docs = 42% of traffic; top-20 = 69%.
+
+| L2 capacity | L2 hit rate | L3 hit rate | miss rate | median L2 get | median L3 get |
+|---|---|---|---|---|---|
+| L3-only (baseline) | 0.0% | 100.0% | 0.0% | — | 0.47 ms |
+| L2=5% WS  (1 MB) | 23.6% | 76.4% | 0.0% | 0.00 ms | 0.47 ms |
+| L2=10% WS (2 MB) | 37.9% | 62.1% | 0.0% | 0.00 ms | 0.47 ms |
+| L2=20% WS (5 MB) | 55.5% | 44.5% | 0.0% | 0.00 ms | 0.47 ms |
+| L2=50% WS (12 MB) | 80.5% | 19.5% | 0.0% | 0.00 ms | 0.47 ms |
+| L2=100% WS (25 MB) | 100.0% | 0.0% | 0.0% | 0.00 ms | — |
+
+**L2 (pinned RAM) reads are 245–322× faster than L3 (NVMe).** Even with
+only 5% of working set in L2, Zipfian skew delivers 24% L2 hit rate (top-5
+"hot" docs soak up 42% of requests). At 20% L2 capacity, over half of all
+accesses are served from RAM.
+
+## Phase 3.6 — Tool-call eviction buffer (NVMe KV persistence)
+
+**Date:** 2026-04-23. Model: Qwen2.5-1.5B bf16, GPU box (RTX 3080 Ti 12GB).
+Script: `scripts/bench_tool_eviction.py`. Repeats: 3 independent trials.
+
+**Scenario:** An agent prefills a 6 272-token document context, saves KV to
+NVMe via EdgeServeKVConnector, then exits (simulating giving up the GPU slot
+for another task). Later the agent returns. Two resumption paths:
+
+- **B1 baseline (no EdgeServe):** fresh vLLM process, full cold re-prefill
+- **EdgeServe restore:** fresh vLLM + connector, loads KV directly from the
+  same-host NVMe file (bypasses Pulsar HTTP — `_is_local_readable()` = True)
+
+| model | doc-repeats | ~tokens | seed ms | B1 baseline ms | EdgeServe restore ms | speedup | correct |
+|-------|-------------|--------:|--------:|---------------:|---------------------:|--------:|---------|
+| Qwen2.5-1.5B | 128 | ~6 272 | 617 | 240 | 171 | **1.41×** | ✓ |
+
+All 3 trials matched token output (token=576). The NVMe file is ~116 MB per
+agent context block; restore cost is dominated by safetensors deserialisation
++ GPU scatter (~30–40 ms) rather than raw disk I/O (~16 ms at ~7 GB/s).
+
+**NVMe files survive GPU eviction** — the seeder process exits before the
+restore starts, so the GPU KV cache is completely cold, yet the agent resumes
+without re-prefill. The 1.41× speedup is conservative (short context favors
+GPU prefill); a 7B model or 32k-token context would widen the gap further.
+
 ## Reproducing
 
 ```bash
