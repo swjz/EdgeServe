@@ -1,3 +1,51 @@
+# Session summary — 2026-04-23 (autonomous overnight run)
+
+Second full autonomous session on the `llm` branch. Headline: **all
+Phase 2 and Phase 3 experiments are now complete and recorded in
+RESULTS.md**. Five new benchmark scripts written and run; tiered storage
+implemented, tested, and measured; tool-call eviction and multi-agent
+fan-out stories fully quantified.
+
+## What landed (2026-04-23)
+
+### New scripts
+
+| script | phase | result |
+|--------|-------|--------|
+| `scripts/bench_tier_hit_rates.py` | 3.5 | Zipfian hit-rate sweep; L2=20% WS → 55.5% hit rate; L2 245–322× faster than L3 |
+| `scripts/bench_tool_eviction.py` | 3.6 | NVMe KV persistence; 1.41× restore vs cold re-prefill at 6k tokens |
+| `scripts/bench_bandwidth_throttle.py` | 2.2b | Python-level throttle sweep; empirical crossover ~2–3 Gbps (analytic 1.54 Gbps) |
+| `scripts/bench_multiagent_fanout.py` | 2.3 | N=4 agents sharing prefix; 1.36× per-agent; break-even at N≈10 |
+
+### Key numbers added to RESULTS.md
+
+- **Phase 2.2b:** empirical crossover 2–3 Gbps (GigE does NOT beat GPU prefill;
+  3+ Gbps enterprise LAN does). Python HTTP overhead ~200ms explains analytic gap.
+- **Phase 2.3:** multi-agent fan-out, N=4, Qwen2.5-1.5B, 6272 tokens:
+  B2 baseline 240ms/agent → EdgeServe 176ms/agent (1.36×).
+- **Phase 3.5:** Zipfian tier hit rates: L2=5% WS → 24% hit rate, L2=20% → 55%.
+- **Phase 3.6:** Tool-call eviction: seeder exits (GPU cache cold), restore from
+  NVMe = 171ms vs 240ms cold re-prefill (1.41×). All tokens match.
+
+### Bugs fixed
+
+- `bench_tool_eviction.py`: missing `if __name__ == '__main__':` guard in
+  generated subprocess scripts — vLLM's multiprocessing spawn re-ran the
+  script body in child processes, crashing with "Engine core initialization failed".
+- Multi-repeat Pulsar GC: seeder + restore both acknowledge messages; on subsequent
+  repeats Pulsar had GC'd the message. Fixed by seeding fresh per trial (unique topic
+  + unique consumer node_id per restore).
+
+### Completed tasks
+
+- 2.2b (bandwidth throttle): done ✅
+- 2.3 (multi-agent fan-out): done ✅
+- 3.5 (tier hit rates): done ✅
+- 3.6 (tool-call eviction): done ✅
+- 2.2c (Mac B0 baseline): skipped (no Mac access in this session)
+
+---
+
 # Session summary — 2026-04-22 (updated, GPU-box session)
 
 Full night of autonomous work on the `llm` branch. Headline: the

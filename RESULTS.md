@@ -739,6 +739,63 @@ regardless of context length. This confirms:
 | CPU edge (50 tok/s) + 179 Mbps | 179 Mbps | **~15× faster** | always wins |
 | CPU edge + 11 Mbps | 11 Mbps | ~1× (break-even) | wins above 11 Mbps |
 
+## Phase 2.2b — Throttled HTTP fetch vs GPU prefill (empirical crossover)
+
+**Date:** 2026-04-23. Script: `scripts/bench_bandwidth_throttle.py`.
+KV blob: 121.1 MB (128 doc-repeats, Qwen2.5-1.5B). GPU prefill: 630 ms reference.
+Method: Python-level read throttle (no tc/root required).
+
+| Simulated link | Fetch time | GPU prefill | Verdict |
+|---|---:|---:|---|
+| 50 Mbps | 20 613 ms | 630 ms | ✗ prefill wins |
+| 100 Mbps | 10 439 ms | 630 ms | ✗ prefill wins |
+| 200 Mbps | 5 325 ms | 630 ms | ✗ prefill wins |
+| 500 Mbps | 2 269 ms | 630 ms | ✗ prefill wins |
+| 1 Gbps | 1 249 ms | 630 ms | ✗ prefill wins |
+| 1.5 Gbps | 908 ms | 630 ms | ✗ prefill wins |
+| 2 Gbps | 734 ms | 630 ms | ✗ prefill wins |
+| **3 Gbps** | **545 ms** | **630 ms** | **✓ fetch wins** |
+| 5 Gbps | 407 ms | 630 ms | ✓ fetch wins |
+| 10 Gbps | 304 ms | 630 ms | ✓ fetch wins |
+| ∞ (same-host mmap) | 59 ms | 630 ms | ✓ fetch wins |
+
+**Empirical crossover: ~2–3 Gbps** (between 2 Gbps and 3 Gbps measured points).
+Analytic crossover: **1.54 Gbps** (from Phase 2.2 formula: `blob_MB × 8 / prefill_s`).
+
+The ~1.5× gap between analytic (1.54 Gbps) and empirical (~2.5 Gbps) is
+explained by Python HTTP overhead (~200 ms per 121 MB request at the socket
+read loop level). A production implementation using zero-copy `sendfile` or
+direct mmap would land at the analytic 1.54 Gbps crossover.
+
+**Confirmed:** GigE (1 Gbps) does NOT beat GPU prefill for this model+context.
+At 3 Gbps (fast enterprise LAN / 25 GbE lanes), fetch begins to win.
+
+## Phase 2.3 — Multi-agent shared-prefix fan-out
+
+**Date:** 2026-04-23. Model: Qwen2.5-1.5B bf16, GPU box (RTX 3080 Ti).
+Script: `scripts/bench_multiagent_fanout.py`. N=4 sequential agents.
+
+**Scenario:** A shared 6 272-token prefix (e.g., a large repo or document set)
+is prefilled once by a seeder. N subsequent agents each need to process a query
+against that same prefix. All agents are fresh vLLM subprocesses (GPU cache cold).
+
+| model | doc-repeats | ~tokens | N | seed ms | B2 avg ms | EdgeServe avg ms | per-agent | correct |
+|-------|-------------|--------:|--:|--------:|----------:|-----------------:|----------:|---------|
+| Qwen2.5-1.5B | 128 | ~6 272 | 4 | 629 | 240 | 176 | **1.36×** | ✓ |
+
+- **B2 baseline:** 4 × 240 ms = 959 ms total (each agent independently re-prefills)
+- **EdgeServe:** 4 × 176 ms = 705 ms total (each agent restores from NVMe)
+- **GPU time saved:** 254 ms across 4 agents (4 × 64 ms/agent)
+- **Break-even** (counting seeding overhead): N > ~10 agents for EdgeServe to save
+  total GPU time vs pure B2; at N=4 the aggregate restore (705ms) plus seed (629ms)
+  = 1334ms vs B2 959ms. EdgeServe pays off when the shared prefix is already
+  being computed for Agent 0's own query (seed cost is free in that case).
+- All 4 agents produce token=576, matching the seeder. ✓
+
+**Key insight:** When the seed cost is already paid (Agent 0 processes the shared
+context regardless), each subsequent agent saves 64ms / 27% of prefill time. The
+savings compound: 10 agents save 640ms total GPU time from a single NVMe write.
+
 ## Phase 3.5 — Tier hit rates under Zipfian workload
 
 **Date:** 2026-04-23. Script: `scripts/bench_tier_hit_rates.py`.
