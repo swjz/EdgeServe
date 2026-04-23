@@ -164,20 +164,61 @@ See `DESIGN.md` — the project is now framed as a **KV-Cache CDN for
 edge LLM serving**. Read it before starting new work. The road map
 phases are in `TODO.md`.
 
+## Phase 2: LAN CDN measurements (COMPLETE, 2026-04-22)
+
+`scripts/demo_kvconnector_lan.py` end-to-end pipeline confirmed working:
+seeder (GPU box) → Pulsar catalog → consumer (Mac Mini) → HTTP fetch.
+
+Key numbers (Qwen2.5-1.5B, 256 doc-repeats = 8448 tokens, 234.9 MB blob):
+
+| metric | value |
+|--------|-------|
+| LAN throughput | 165–183 Mbps (Python HTTP server) |
+| Median fetch | 10.5–11.4 s |
+| GPU prefill | 1.38 s (3080 Ti) |
+| **Fetch / recompute** | **~7.5–8× slower** |
+
+Crossover analysis: fetch beats recompute when network > 1 Gbps actual,
+or on CPU-only edge devices (50 tok/s prefill → 14× faster via LAN).
+Full table in `RESULTS.md §Phase 2`.
+
+### Bugs found and fixed
+
+- **Pulsar subscription cursor**: `HeaderCatalog` now calls
+  `consumer.unsubscribe()` on `close()` to delete the durable subscription,
+  so the next connection with the same name starts from `Earliest`.
+  Without this, previous-run cursors caused Mac Mini consumer to see nothing.
+- **Seeder readback**: `block_uuid` is stored as raw bytes in the msgpack;
+  must decode with `uuid.UUID(bytes=...)` not `str(d['block_uuid'])`.
+- **vLLM entity tags cross-process**: `set_next_request_entities` sets a
+  module-level global in the main process, but vLLM's EngineCore runs in
+  a spawned subprocess. Entity tags DON'T propagate. Bloom only has prefix
+  hashes. Catalog discovery works via prefix-hash path (no entity tags).
+
+### SGLang: permanently blocked
+
+`sgl_kernel` source build OOM-kills a 32 GB machine (nvcc `cicc` uses
+4–7 GB per process; 4 simultaneous = 28 GB, kills Pulsar and itself).
+Pre-built wheels are SM90-only with undefined SM100 symbols. Skip.
+Full write-up in `RESULTS.md §Benchmark honesty audit`.
+
 ## Next milestones
 
-- **Phase 2**: LAN CDN measurements — Mac Mini ↔ GPU box, HTTP fetch
-  timing, bandwidth-vs-recompute crossover curve (`TODO.md §2`).
-- **sgl_kernel build**: PID 120180 building (v2, adding stub files
-  back so linker doesn't fail). When done: install, run
-  `bench_engines.py --engines sglang-radix`, add to RESULTS.md.
+- **Phase 2.2**: bandwidth-vs-recompute crossover benchmark — sweep
+  blob sizes (different doc-repeats) and record fetch time vs recompute.
+  Script: `scripts/bench_bandwidth_crossover.py` (not yet written).
+  The crossover point mathematically is `network_bw > 132 MB/s (1.05 Gbps)`
+  for this GPU.
+- **Phase 3**: tiered storage — L1/L2/L3 eviction policy design,
+  `edgeserve/semantic_cache/tiered_store.py` sketch.
 
 ## Pointers for next session
 
 - `DESIGN.md` — architecture thesis and economic case.
 - `TODO.md` — prioritised phase-by-phase task list.
-- `RESULTS.md` — all numbers; start with TL;DR table.
+- `RESULTS.md` — all numbers; start with TL;DR table; Phase 2 section.
+- `scripts/demo_kvconnector_lan.py` — LAN demo; `seed` on GPU box,
+  `consume` on Mac Mini with `--prefix-hash` or `--block-uuid + --node-uri`.
 - `scripts/demo_kvconnector_semantic.py` — Phase 1 demo (entity tags).
-- `edgeserve/inference/vllm_kv_connector.py` — connector code;
-  `set_next_request_entities`, `_Scheduler.get_num_new_matched_tokens`,
-  `_Worker.wait_for_save` are the entity-tag entry points.
+- `edgeserve/inference/vllm_kv_connector.py` — connector code.
+- `edgeserve/semantic_cache/catalog.py` — `close()` now unsubscribes.
