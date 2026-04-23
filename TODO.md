@@ -362,6 +362,155 @@ in-datacenter solutions" checkbox.
 
 ---
 
+## Phase 6 — End-to-end edge inference demo (NEXT PRIORITY)
+
+**Goal:** close the gap between the architecture thesis ("decode at the edge, prefill
+near the data") and what's currently demonstrated. Every existing demo runs inference
+on the GPU box. This phase builds the demo where a user on the Mac asks a question,
+the Mac fetches cached KV from the GPU box, and generates the answer *locally* —
+the user's prompt and the generated tokens never leave the Mac.
+
+The Mac cannot run vLLM (no CUDA). Use `HFEngine` + `kv_io.load_past_key_values_from_path`
+on the consumer side. This path already works (it's what `demo_kvconnector_lan.py`
+uses for the Mac) but has not been wired into a full interactive inference demo.
+
+### 6.1 — Mac consumer: KV-injected HF inference 🔲
+
+Pipeline:
+1. GPU box (context server): ingests a large document. Connector publishes KV to
+   catalog + NVMe.
+2. Mac: user types a query suffix.
+3. Mac: queries bloom-filter catalog (Pulsar) → discovers block UUID.
+4. Mac: HTTP-fetches KV blob from GPU box.
+5. Mac: injects into HF `past_key_values`; calls `model.generate(suffix_tokens)`.
+6. Mac: prints answer. Document text, prompt, and generated tokens stay on Mac.
+
+Measure end-to-end from "user hits enter" to "first token generated":
+
+| path | latency breakdown | total |
+|------|------------------|-------|
+| B0 (Mac prefills doc+query locally) | Mac prefill ~7.7s (4k tok) | ~7.7s |
+| EdgeServe (LAN fetch + Mac decode) | fetch ~3.4s + decode ~0.1s | ~3.5s |
+
+Script: `scripts/demo_edge_inference.py`. Run seeder on GPU box, consumer CLI on Mac.
+
+### 6.2 — Multi-turn conversation 🔲
+
+After Q1+A1, the conversation prefix grows. Measure second-query latency when the
+new delta (Q1+A1, a few hundred tokens) is the only cold portion.
+Shows that the KV CDN compounds benefits across turns.
+
+### 6.3 — Privacy claim writeup 🔲
+
+Document what crosses the wire in the EdgeServe model vs. the cloud-API model:
+- Cloud API: prompt + context sent to remote server; generated tokens returned.
+- EdgeServe: document pushed to nearby context server (same trust as cloud, but
+  over LAN, controllable). Live prompt and generated tokens never leave the edge.
+Quantify: under EdgeServe, what is the minimum information the context server must
+see? (Answer: the document text at ingest time; not the query or response.)
+
+---
+
+## Phase 7 — Comparison baselines
+
+These are the comparisons a systems conference reviewer will immediately ask for.
+
+### 7.1 — B1 honest same-host framing 🔲
+
+B1 = single vLLM instance, `enable_prefix_caching=True`, serving all N agents
+via one `llm.generate(prompts=[...])` call (continuous batching).
+
+Run same workload as Phase 2.3 (N=4, 6k-token shared prefix):
+
+| system | mechanism | per-agent TTFT | notes |
+|--------|-----------|---------------:|-------|
+| B2 (N separate vLLM, no share) | N full prefills | 240 ms | current baseline |
+| EdgeServe cross-process | bloom lookup + NVMe restore | 176 ms (1.36×) | current result |
+| B1 (single vLLM, APC, batched) | internal radix cache | TBD — expected ~25 ms | the hard baseline |
+
+**Expected finding:** EdgeServe does NOT beat B1 on a single host. State this
+upfront. EdgeServe's niche is when N agents span multiple hosts, or when the edge
+device cannot run vLLM (Mac scenario). Framing the paper around this niche is
+stronger than overclaiming.
+
+Deliverable: one additional row in RESULTS.md §Phase 2.3 table + explicit framing
+paragraph.
+
+### 7.2 — LMCache direct comparison 🔲
+
+LMCache (MLSys'25) stores KV on CPU/disk per process, retrieves on cache hit.
+Install: `pip install lmcache`. Configure as a vLLM KVConnector alongside ours.
+
+Same workload (N=4 agents, 6k-token prefix, sequential processes):
+
+| system | discovery mechanism | warm TTFT | cold-node setup cost |
+|--------|--------------------:|----------:|---------------------:|
+| LMCache | explicit URL/registry | TBD | must configure server address |
+| EdgeServe | bloom-filter broadcast | 176 ms | zero — any node subscribes to topic |
+
+**Key differentiator to measure:** cold-node discovery. Spin up a new agent on a
+node that has never seen the document. With LMCache, the new node needs explicit
+configuration pointing at the caching node. With EdgeServe, it subscribes to the
+Pulsar topic and discovers the KV via the bloom catalog automatically. Measure
+time-to-first-hit for a completely cold node in each system.
+
+Script: `scripts/bench_lmcache_vs_edgeserve.py`.
+
+### 7.3 — NIXL / NixlConnector comparison 🔲
+
+`NixlConnector` ships with vLLM 0.19 and is registered alongside `EdgeServeKVConnector`
+in the factory. Configure NIXL for the same cross-process same-host scenario.
+
+| system | transport | warm overhead vs internal APC | cross-host capable |
+|--------|-----------|-------------------------------:|:------------------:|
+| NixlConnector | UCX/shared mem | TBD | only with RDMA fabric |
+| EdgeServeKVConnector | mmap safetensors | +6–55 ms | yes (HTTP fallback) |
+
+**NIXL's likely advantage:** lower same-host latency (UCX bypasses Python).
+**EdgeServe's likely advantage:** works cross-host without RDMA; bloom-filter
+discovery removes per-node configuration; entity tagging for semantic lookup.
+
+Measure same-host warm hit latency for each connector at 5k and 20k tokens.
+Script: `scripts/bench_nixl_vs_edgeserve.py`.
+
+---
+
+## Phase 8 — Scale (deferred — needs A100 / H100 or multi-GPU)
+
+Current hardware (RTX 3080 Ti, 12 GB) limits us to 1.5B models and ~8k tokens.
+The motivating use case in DESIGN.md is 7B+ models and 50k-token codebases.
+Revisit when better GPU access is available.
+
+### 8.1 — 7B model evaluation 🔲
+
+Model: Qwen2.5-7B or Llama-3-8B (requires ~24 GB VRAM minimum for BF16).
+
+Key hypotheses:
+- KV blob for 7B at 8k tokens ≈ 1.4 GB. At 1 Gbps LAN ≈ 11s; GPU prefill ≈ ?
+  Expected: crossover shifts to lower bandwidth → CDN economics improve.
+- Multi-agent fan-out at N=8–16 becomes the interesting operating point.
+- Tool-eviction speedup at 7B should be substantially higher (larger blob
+  serialization cost < quadratic attention cost for long contexts).
+
+Run the full crossover analysis (Phase 2.2) and multi-agent fan-out (Phase 2.3)
+at 7B / 32k tokens.
+
+### 8.2 — 32k+ token context 🔲
+
+7B model, 32k tokens: KV ≈ 5.6 GB. At 10 GbE (1 GB/s): 5.6s transfer.
+Flash attention prefill on A100: roughly 15–30s (model-dependent).
+Expected: crossover drops below 1 Gbps — home LAN starts to win even for GPU edge.
+
+This is the regime where the paper's thesis is unambiguously correct. Measure it.
+
+### 8.3 — Multi-host multi-GPU cluster 🔲
+
+2–4 GPU nodes on a 10 GbE switch. One context server, N edge-inference nodes.
+Measure: catalog discovery latency under multi-publisher traffic; throughput of the
+Pulsar topic under N concurrent consumers; hit rate as fleet grows.
+
+---
+
 ## Honesty threads to keep tracking
 
 - ~~Phase 1 entity-tag numbers haven't been recorded in RESULTS.md~~

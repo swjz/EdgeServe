@@ -204,45 +204,45 @@ edit, not per token; this doesn't saturate the upstream link.
 
 ---
 
-## What's built today vs. what's needed
+## What's built (as of 2026-04-23)
 
-Built:
-- Catalog over Pulsar with bloom-filter header broadcast
-  (`edgeserve.semantic_cache.*`)
-- HTTP retrieval + same-host mmap fast path
-  (`CacheHttpServer`, `kv_io.load_past_key_values_from_path`)
-- vLLM `KVConnectorBase_V1` implementation with paged-buffer
-  gather/scatter (`edgeserve.inference.vllm_kv_connector`)
-- **Prefix-hash** bloom entries and longest-prefix scheduler lookup
-- Correctness tests (bit-exact warm-path token match)
-- Same-host multi-process benchmarks: 2.4-3.3× speedup (see
-  RESULTS.md, caveats in "Benchmark honesty audit")
+| component | file | status |
+|-----------|------|--------|
+| Bloom-filter catalog over Pulsar | `edgeserve/semantic_cache/` | ✅ |
+| HTTP retrieval + same-host mmap fast path | `CacheHttpServer`, `kv_io.py` | ✅ |
+| vLLM `KVConnectorBase_V1` (paged-buffer gather/scatter) | `vllm_kv_connector.py` | ✅ |
+| Prefix-hash bloom entries + longest-prefix scheduler lookup | same | ✅ |
+| User-declared entity tags (semantic lookup) | `set_request_entities`, `_Scheduler` | ✅ |
+| Entity versioning + tombstones | `CacheHeader.deleted`, `TieredStore.on_tombstone` | ✅ |
+| Tiered storage L2 (pinned RAM) + L3 (NVMe) | `tiered_store.py` | ✅ |
+| Context-push daemon (ingest endpoint + edge watcher) | `context_server.py`, `watcher.py` | ✅ |
+| Correctness tests (bit-exact warm-path token match) | `tests/test_vllm_kv_connector.py` | ✅ |
+| Cross-host LAN measurement (Mac Mini ↔ 3080 Ti) | `demo_kvconnector_lan.py` | ✅ |
+| Bandwidth-vs-recompute crossover benchmark | `bench_bandwidth_crossover.py`, `bench_bandwidth_throttle.py` | ✅ |
 
-Not built (the ordered gap list):
+What remains (ordered gap list for the paper):
 
-1. **Entity-tag publish and lookup** — the single biggest gap. Today
-   the bloom contains token-prefix hashes; the design needs
-   user-declared entity tags. Code lives in
-   `vllm_kv_connector._Worker.wait_for_save`,
-   `_Scheduler.get_num_new_matched_tokens`.
-2. **Cross-host LAN measurement** — the headline figure. Mac Mini ↔
-   3080 Ti over home LAN. Existing `CacheHeader.hostname` logic falls
-   back to HTTP automatically when hostnames differ; need the actual
-   benchmark.
-3. **Bandwidth-vs-recompute crossover benchmark** — the paper's money
-   graph. Sweep model size × context length × simulated link
-   bandwidth; plot curves for "prefill local" vs "pull KV" wall time.
-4. **Tiered storage** — L1/L2/L3 policy on the context server. Today
-   entries live only in the publisher's `local_cache_path` and are
-   never evicted.
-5. **Context-push daemon** — edge-side file watcher + ingest
-   protocol. Today the context server is purely reactive to vLLM
-   `generate` calls; it has no "receive updated context" API.
-6. **Entity versioning + tombstones** — content-sha in the entity
-   tag; invalidation on change.
-7. **Zero-copy transports** — CUDA IPC (same-host) and RDMA / NCCL
-   (cross-host) to drop the per-hit overhead. Would move the
-   crossover point in favor of cache reuse for smaller contexts.
+1. **End-to-end edge inference demo** — a user on the Mac types a query; Mac
+   fetches KV from GPU box; Mac generates answer locally; prompt and tokens
+   never leave the Mac. Currently every demo runs inference on the GPU box.
+   This is the single demo that proves the thesis. → Phase 6.
+
+2. **LMCache direct comparison** — same workload, both systems, side-by-side
+   TTFT and cold-node discovery latency. Required by any systems reviewer.
+   → Phase 7.2.
+
+3. **NIXL / NixlConnector comparison** — overhead vs same-host warm hit;
+   cross-host capability difference. → Phase 7.3.
+
+4. **B1 honest framing** — measure single-vLLM-with-APC as the hard same-host
+   ceiling and explicitly state EdgeServe's niche (cross-host / Mac edge).
+   → Phase 7.1.
+
+5. **7B model + 32k-token evaluation** — the regime the thesis is strongest in.
+   Requires A100 or multi-GPU. → Phase 8.
+
+6. **Zero-copy transports** — CUDA IPC (same-host, −6–55 ms overhead) and RDMA
+   (cross-host). Deferred. → Phase 5.
 
 ---
 
@@ -251,19 +251,88 @@ Not built (the ordered gap list):
 - **EdgeServe** (Shaowang & Krishnan, 2023): parent. Decentralized
   streaming model serving over Pulsar. This design reuses the
   catalog+pubsub substrate and extends the payload type to KV cache.
-- **vLLM prefix caching / RadixAttention** (Kwon et al.;
-  Zheng et al.): the in-process ceiling we ride on top of. Our work
-  is strictly a *layer above* vLLM's own cache; when vLLM's cache
-  hits, our layer is bypassed.
-- **LMCache / NIXL / Mooncake**: in-datacenter disaggregated KV
-  transfer. Same primitive (move KV between servers), different
-  operating point (GPU cluster with fast interconnect vs. LAN-scale
-  edge with heterogeneous hardware).
-- **Coral** (NSDI '04) and **hierarchical web caches** (Squid, Traffic
-  Server): bloom-filter-over-distributed-cache precedent for the
-  discovery layer.
-- **Content-addressable storage** (IPFS, Git): entity-tag-as-key is a
-  content-addressing pattern.
+
+- **vLLM prefix caching / RadixAttention** (Zheng et al., 2023): the
+  in-process ceiling we ride on top of. Our work is strictly a *layer
+  above* vLLM's own APC; when vLLM's cache hits, our layer is bypassed.
+  Our connector adds +6–55 ms overhead vs. the internal APC — this is
+  the cost of cross-process capability.
+
+- **LMCache** (MLSys'25): stores KV blocks on CPU/disk per vLLM process,
+  retrieves on prefix hit. Core overlap with this work. **Key difference:**
+  LMCache requires explicit configuration of which node holds what KV;
+  EdgeServe uses bloom-filter broadcast for zero-configuration discovery —
+  a new consumer on a cold node subscribes to the Pulsar topic and finds
+  cached KV without any manual registry. **Measurement needed:** Phase 7.2.
+
+- **NIXL / NixlConnector** (vLLM 0.19+): UCX-based KV transfer between
+  vLLM processes, shipped in-tree. Registered alongside `EdgeServeKVConnector`
+  in vLLM's connector factory. NIXL likely has lower latency on the same host
+  (UCX shared memory vs. mmap safetensors) but requires RDMA fabric for
+  cross-host; EdgeServe falls back to HTTP for arbitrary LAN topologies and
+  adds the semantic entity discovery layer. **Measurement needed:** Phase 7.3.
+
+- **Mooncake** (ATC'25): disaggregated prefill-decode over RDMA in a GPU
+  datacenter. Same primitive (move KV between servers) but targets a very
+  different operating point: high-bandwidth GPU cluster vs. heterogeneous
+  LAN edge with CPU/MPS consumer nodes. Not a direct competitor; useful as
+  an upper-bound reference for what zero-copy transport can achieve.
+
+- **Coral** (NSDI '04) and **hierarchical web caches** (Squid, Varnish):
+  bloom-filter-over-distributed-cache precedent. Coral filtered DHT lookups
+  with per-node blooms to avoid network RTTs for cold misses. We apply the
+  same pattern to KV-cache discovery. The difference: our entities are
+  semantic (model + content SHA) rather than URL hashes.
+
+- **PromptCache** (2023): caches KV for *schema-defined* prompt segments,
+  reuses across requests whose prompts share those segments. Complements
+  RadixAttention. EdgeServe is strictly at a higher layer — we move KV
+  across process and host boundaries, regardless of how the KV was
+  generated. PromptCache could feed our catalog as a publisher.
+
+### How to differentiate (for the paper)
+
+The **central novelty claim** is the combination of:
+1. Semantic entity tagging (not raw URL or prefix hash) as the cache key,
+   enabling cache discovery even when the exact tokenized context is unknown.
+2. Bloom-filter broadcast over Pulsar for zero-configuration cross-node
+   discovery — no central registry, no per-node config.
+3. Tiered storage (L2 RAM + L3 NVMe) on the context server for durability
+   across GPU eviction and process restarts.
+4. HTTP fallback transport that works over any LAN without RDMA fabric.
+
+LMCache has (3) partially; NIXL has better (4) transport but not (1)/(2).
+No existing system combines all four for the edge LAN deployment context.
+
+---
+
+## Evaluation roadmap
+
+Each paper claim maps to a specific experiment. Use this table to track coverage.
+
+| claim | experiment | status | section |
+|-------|-----------|--------|---------|
+| Cross-process KV sharing works and is correct | Phase 2.3 fan-out, bit-exact token match | ✅ RESULTS §2.3 | §eval.correctness |
+| Crossover: fetch beats prefill above ~1.5 Gbps (GPU edge) | Phase 2.2 bandwidth sweep | ✅ RESULTS §2.2 | §eval.crossover |
+| Crossover: fetch beats prefill above ~125 Mbps (Mac edge) | Phase 2.2c Mac M4 baseline | ✅ RESULTS §2.2c | §eval.crossover |
+| Tiered storage delivers LRU hit rates under Zipfian load | Phase 3.5 hit-rate sweep | ✅ RESULTS §3.5 | §eval.tiers |
+| NVMe persistence survives GPU eviction, speedup on restore | Phase 3.6 tool eviction | ✅ RESULTS §3.6 | §eval.eviction |
+| Context-push pipeline (edit → ingest → restore) works | Phase 4.4 end-to-end demo | ✅ RESULTS §4 | §eval.contextpush |
+| **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | 🔲 TODO §6 | §eval.privacy |
+| **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | 🔲 TODO §7.1 | §eval.baselines |
+| **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
+| **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
+| CDN economics improve at 7B / 32k tokens | Phase 8.1–8.2 scale evaluation | 🔲 deferred | §eval.scale |
+
+**Priority order for next work sessions:**
+
+1. Phase 6 (end-to-end Mac demo) — closes the thesis-vs-demo gap; builds
+   the figure the paper's introduction should show.
+2. Phase 7.1 (B1 framing) — one extra row in the existing results table;
+   directly addresses the "why not just use vLLM APC" reviewer question.
+3. Phase 7.2 (LMCache) — required for any systems venue submission.
+4. Phase 7.3 (NIXL) — secondary; useful if we target a vLLM-aware audience.
+5. Phase 8 (scale) — deferred until better GPU hardware is available.
 
 ---
 
