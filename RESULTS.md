@@ -283,10 +283,11 @@ Both landed.
 ## What this run does NOT demonstrate
 
 - **Cross-host speedup.** All workers here share one GPU + localhost.
-  LAN results (Mac Mini ↔ 3080 Ti) are now in the "Phase 2: LAN CDN
+  LAN results (Mac Mini ↔ 3080 Ti) are in the "Phase 2: LAN CDN
   transport" section: 179 Mbps sustained, 10.5s for a 234.9 MB blob,
-  5.9× slower than recompute on a home LAN. Crossover requires ≥ 1 Gbps
-  network or a CPU-only consumer (14× benefit at 50 tok/s prefill).
+  ~8× slower than recompute on a home LAN. Crossover benchmark (Phase
+  2.2) shows the threshold is **~1.2–1.6 Gbps** (10 GbE or faster),
+  or **11 Mbps** for a CPU-only consumer at 50 tok/s prefill.
 
 - **EdgeServe routing on top of vLLM.** The Phase-3 numbers above use
   `HFEngine`; the raw per-agent prefill is much slower than vLLM. A
@@ -680,6 +681,62 @@ dramatically by deployment context.
   had a stale subscription cursor issue (Pulsar durable subscriptions remember
   the cursor across reconnects); the direct-fetch path was used for these numbers.
 
+## Phase 2.2 — bandwidth-vs-recompute crossover sweep (same-host mmap)
+
+**Date:** 2026-04-23. Model: Qwen2.5-1.5B bf16, GPU box (RTX 3080 Ti).
+Script: `scripts/bench_bandwidth_crossover.py sweep`. Same-host mmap path
+(consumer and seeder on the same machine) — measures the upper bound on
+fetch speed before network becomes the bottleneck.
+
+| doc-repeats | ~tokens | blob MB | prefill s | mmap fetch s | ratio | mmap throughput |
+|-------------|--------:|--------:|----------:|-------------:|------:|----------------:|
+| 16  | ~544  |  15.1 | 0.10 | 0.01 | **0.07×** | 17 059 Mbps |
+| 32  | ~1089 |  30.3 | 0.17 | 0.03 | **0.17×** |  8 324 Mbps |
+| 64  | ~2178 |  60.6 | 0.31 | 0.05 | **0.16×** |  9 556 Mbps |
+| 128 | ~4356 | 121.1 | 0.63 | 0.13 | **0.20×** |  7 575 Mbps |
+| 256 | ~8448 | 234.9 | 1.35 | 0.22 | **0.17×** |  8 422 Mbps |
+
+Same-host mmap is **5–14× faster than GPU prefill** at every blob size.
+The ratio is nearly flat (0.07–0.20×) because both blob size and prefill
+time scale linearly with token count.
+
+### Crossover bandwidth analysis
+
+The crossover network speed required to beat GPU recompute is:
+
+```
+crossover_bw = blob_MB / prefill_s = (kv_density × tokens) / (tokens / gpu_tok_s)
+             = kv_density × gpu_tok_s
+```
+
+This is a constant independent of context length (for this model+GPU):
+
+| doc-repeats | ~tokens | blob MB | prefill s | crossover (Mbps) | crossover (Gbps) |
+|-------------|--------:|--------:|----------:|-----------------:|-----------------:|
+| 16  |  ~544 |  15.1 | 0.10 | 1 208 | 1.21 |
+| 32  | ~1089 |  30.3 | 0.17 | 1 426 | 1.43 |
+| 64  | ~2178 |  60.6 | 0.31 | 1 564 | 1.56 |
+| 128 | ~4356 | 121.1 | 0.63 | 1 538 | 1.54 |
+| 256 | ~8448 | 234.9 | 1.35 | 1 392 | 1.39 |
+
+**Crossover is consistently 1.2–1.6 Gbps** for Qwen2.5-1.5B on a 3080 Ti,
+regardless of context length. This confirms:
+
+- Our **home LAN at 179 Mbps is 7–8× below the crossover** — fetch loses at every size.
+- A **10 GbE link at ≥1.4 Gbps sustained** would make fetch faster than recompute.
+- On a **CPU-only edge device** (≈50 tok/s prefill): crossover drops to
+  27.8 KB/tok × 50 tok/s = 1.39 MB/s = **11 Mbps** — any 100 Mbps LAN wins.
+
+### Combined picture
+
+| scenario | link | fetch vs recompute | verdict |
+|---|---|---|---|
+| Same-host mmap (measured) | ~8 Gbps | 5–14× **faster** | always wins |
+| 10 GbE LAN (≥1.4 Gbps actual) | 1 400+ Mbps | ~1× (break-even) | wins for large context |
+| Gigabit Ethernet (179 Mbps actual) | 179 Mbps | **~7–8× slower** | loses on GPU edge |
+| CPU edge (50 tok/s) + 179 Mbps | 179 Mbps | **~15× faster** | always wins |
+| CPU edge + 11 Mbps | 11 Mbps | ~1× (break-even) | wins above 11 Mbps |
+
 ## Reproducing
 
 ```bash
@@ -687,6 +744,24 @@ dramatically by deployment context.
 docker run -d --name pulsar-bench -p 6650:6650 -p 8080:8080 \
   apachepulsar/pulsar:3.1.0 bin/pulsar standalone --no-functions-worker
 
+# Phase 2.2 same-host crossover sweep:
+python scripts/bench_bandwidth_crossover.py sweep \
+  --model Qwen/Qwen2.5-1.5B --doc-repeats 16 32 64 128 256 \
+  --gpu-mem 0.4 --repeats 3
+
+# Phase 2.1 LAN two-host demo (GPU box seeder):
+python scripts/demo_kvconnector_lan.py seed \
+  --model Qwen/Qwen2.5-1.5B --doc-repeats 256 --gpu-mem 0.5
+
+# Then on Mac Mini:
+python scripts/demo_kvconnector_lan.py consume \
+  --pulsar-url pulsar://192.168.1.214:6650 \
+  --topic kvcache-lan-XXXX --model Qwen/Qwen2.5-1.5B --doc-repeats 256
+```
+
+Legacy multi-process HF benchmark:
+
+```bash
 # Then:
 python tests/phase3_multiproc_bench.py \
   --model Qwen/Qwen2.5-1.5B --num-agents 2 \
