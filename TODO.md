@@ -111,50 +111,64 @@ sections can cite):**
   context — that itself is a result.
 - **B1 — vLLM monolithic on 3080 Ti, HTTP decode-forwarding:** all
   compute on GPU, Mac is a dumb client. Honest comparison; avoids
-  vLLM's experimental native P-D (fragile; SGLang blocked).
+  vLLM's experimental native P-D (fragile). SGLang could be a
+  parallel baseline via `.venv-sglang` if desired (`scripts/
+  bench_engines.py --engine sglang-radix` has numbers — 2.60× vs
+  hf-eager on 4-agent/2048-token); not required for the CDN thesis.
 - **B2 — N independent vLLM processes on 3080 Ti:** used in 2.3
   only. Each vLLM has its own APC, no cross-process share. This
   is the baseline EdgeServe clearly beats.
 
-### 2.2 — Experiment 1: Bandwidth-vs-recompute crossover 🔲 next
+### 2.2 — Experiment 1: Bandwidth-vs-recompute crossover 🟡 partial
 
-**The paper's money figure.** At 8448 tokens, current Python HTTP
-transport is **7.5–8× slower** than GPU prefill (see 2.1) — so
-EdgeServe cold is a LOSS at this context size. Mathematical
-crossover for Qwen2.5-1.5B on 3080 Ti: 1.05 Gbps effective
-throughput. The sweep maps where the architecture flips to a win.
+**The paper's money figure.** Same-host sweep landed in commit
+`5ca0e45`; live-network sweep + B0 Mac prefill line still pending.
 
-Physics sketch:
-- Prefill on 3080 Ti grows ~O(n²) for attention at long n (vLLM's
-  flashattn is linear in n for memory but still quadratic FLOPs
-  for compute; prefill wall-time tracks FLOPs at long n).
-- KV bytes grow O(n), so transfer time grows linearly.
-- The quadratic-vs-linear gap means crossover moves toward
-  "transport wins" as context grows.
+**Completed (2.2a ✅ done 2026-04-23):** Same-host mmap sweep for
+Qwen2.5-1.5B on 3080 Ti across 16/32/64/128/256 doc-repeats:
+- mmap fetch is **5–14× faster** than GPU prefill at every size.
+- crossover bandwidth is flat at **1.2–1.6 Gbps** — blob size AND
+  prefill both scale linearly with tokens in the measured range,
+  so the ratio is model+GPU-specific, not context-length-specific.
+- Home LAN at 179 Mbps is 7–8× below crossover → loses on GPU
+  edge. 10 GbE breaks even. CPU edge at 50 tok/s drops crossover
+  to 11 Mbps → any LAN wins.
 
-Sweep:
-- model size: Qwen2.5-0.5B, 1.5B, optionally 3B if fits on Mac.
-- context length: vary `--doc-repeats` (16/32/64/128/256 repeats
-  → ~530–8448 tokens; extend above 8k if Mac decode is feasible).
-- effective link bandwidth: `tc qdisc netem rate Xmbit` to sim
-  100/500/1000 Mbps; real LAN for the measured reference point.
+Key implication for the story: the "crossover plot" is really a
+**single-point** question (what bandwidth does your link have?),
+not a curve across context lengths. The paper figure should be
+bandwidth on the X-axis, ratio on the Y, with the GPU-edge
+horizontal at 1.2–1.6 Gbps and the CPU-edge horizontal at 11 Mbps.
+Annotate real-world links: typical home LAN, datacenter 10 GbE,
+4G/5G WAN.
 
-**Three curves per `(model, context)` point — cold vs warm matters:**
-- **B0 Mac prefill:** TTFT = Mac prefills from scratch (MPS/CPU).
-  May OOM or drop below 5 tok/s at large context — that itself
-  is a finding.
-- **EdgeServe cold:** TTFT = 3080 Ti prefill + LAN KV transfer.
-  Currently slower than B1's local prefill at 8k; sweep tells us
-  where that flips.
-- **EdgeServe warm:** TTFT = LAN KV transfer only; doc already
-  cached on the context server. The CDN amortization story.
+Physics sketch (confirmed by 2.2a):
+- Prefill wall-time on 3080 Ti for Qwen2.5-1.5B scales linearly
+  (not quadratically) over the measured range — flashattn + small
+  model means attention isn't yet the dominant cost.
+- KV bytes scale linearly. Linear / linear = constant ratio.
+- For larger models or longer context, attention may eventually
+  dominate and flip the scaling — worth re-checking at 50k+ on
+  3B/7B models, but not a high priority.
 
-Metric: TTFT. Secondary: throughput to sanity-check decode isn't
-the bottleneck.
+**Pending:**
+- **2.2b — Live-network sweep with throttle.** `tc qdisc netem
+  rate 100|500|1000mbit` on the GPU box, measure actual fetch
+  time to Mac Mini at each throttle. Confirms the crossover math
+  isn't just extrapolation.
+- **2.2c — B0 Mac prefill line.** Actually run Qwen2.5-1.5B (or
+  0.5B if 1.5B OOMs) on Mac MPS/CPU at the same context lengths;
+  produce a TTFT number. Without this the paper's "edge
+  monolithic" baseline is assumed, not measured.
+- **2.2d — Warm-line measurement on live LAN.** 2.2a measured
+  same-host mmap which IS the warm path (local fetch, no prefill);
+  the live-LAN equivalent uses Python HTTP at 179 Mbps (10.5s
+  median in 2.1). That's already the warm number — just restate
+  it as such in RESULTS.md.
 
-Deliverable: `scripts/bench_bandwidth_crossover.py` that runs
-seeder + consumer (over ssh if needed), emits a table, appends
-rows to RESULTS.md §Phase 2.2.
+Deliverable: extend `scripts/bench_bandwidth_crossover.py` with
+netem mode and Mac-side B0 runner; append 2.2b/2.2c numbers to
+RESULTS.md §Phase 2.2.
 
 ### 2.3 — Experiment 2: Multi-agent cross-process fan-out 🔲 pending
 
@@ -378,14 +392,13 @@ in-datacenter solutions" checkbox.
   Phase 4 (context-push) land. The current code is a single-tier
   distributed cache with read-on-demand; the CDN semantics arrive
   with tiering + origin-push.
-- **SGLang: permanently blocked on this machine (2026-04-22).**
-  `cicc` (CUDA IR compiler) uses 4–7 GB RAM per `.cu` file; 4
-  simultaneous = 28 GB, OOM-kills Pulsar and itself on the 32 GB box.
-  Pre-built PyPI wheels are SM90/SM100-only and ABI-incompatible with
-  torch 2.x. Unblocking paths: CUDA 12.8 toolkit upgrade (enables
-  pre-built wheels with SM86 support), or Hopper (H100) machine.
-  Do not attempt a source build on this machine without restricting
-  to `THREADS=1` and closing all other processes.
+- **SGLang: unblocked via separate venv (2026-04-23).** Installed
+  sglang 0.5.10 + torch 2.9.1 in `.venv-sglang` (isolated from the
+  main vLLM venv). sglang-radix measures 2.60× vs hf-eager on the
+  4-agent / 2048-token workload. Not required for the CDN thesis —
+  vLLM numbers stand on their own — but available as a parallel
+  comparison via `bench_engines.py --engine sglang-radix` when
+  reviewers ask.
 
 ---
 
@@ -399,7 +412,7 @@ in-datacenter solutions" checkbox.
 | 1.4 | `#26` | retired (infeasible) — deleted |
 | 1.5 | `#27` | completed (2026-04-22) |
 | 2.1 | `#28` | completed (2026-04-22) |
-| 2.2 | `#30` | pending (Experiment 1, next) |
+| 2.2 | `#30` | partial (Experiment 1 — 2.2a done, 2.2b–d pending) |
 | 2.3 | `#31` | pending (Experiment 2) |
 | 3.6 | `#32` | pending (Experiment 3, blocked on 3.1–3.4) |
 | 5.1 | `#18` | pending (deferred) |
