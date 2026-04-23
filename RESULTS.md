@@ -40,45 +40,40 @@ investing more in transport work. What I found:
   `enable_prefix_caching=True` (internal only) and the connector.
   Shows our cross-process overhead is +6 ms at 5k tokens, +55 ms at 20k.
 
-**SGLang: no real numbers produced — genuinely blocked on this GPU.**
+**SGLang: measured via `.venv-sglang` with sglang 0.5.10 + torch 2.9.1.**
 
-We tried hard:
+Earlier attempts (same venv as vLLM) failed due to `sgl_kernel` ABI
+mismatch with torch 2.10 and SM100-only prebuilt wheels. Resolution: a
+separate virtual environment (`.venv-sglang`) pins `torch==2.9.1+cu128` +
+`sglang==0.5.10.post1` + `sglang-kernel==0.4.1`, which imports cleanly
+on SM86 (RTX 3080 Ti) without any stub hacks. `bench_engines.py
+--engines sglang-radix` runs from that venv; see CLAUDE.md "Two virtual
+environments" for setup instructions.
 
-1. Precompiled `sgl_kernel` wheels target SM100 (Hopper) only and are
-   ABI-bound to older torch — neither works on SM86 + torch 2.10.
-2. `sglang[all]` has no PyPI source distribution — can't `pip install
-   --no-binary`. Cloned `sgl-kernel/` from the `v0.5.9` tag instead.
-3. Source build needs `libnuma-dev` + `libibverbs-dev` (user installed
-   via sudo apt).
-4. Source build needs CMake < 4 (user-side cmake 4.3 vs dlpack
-   submodule's `cmake_minimum_required` incompatibility); downgraded
-   to 3.31.
-5. Pre-built SM90 wheel (from the v0.3.21 package) loads on SM86 but has
-   an undefined symbol: `es_sm100_mxfp8_blockscaled_grouped_quant`. The
-   SM100 `.cu` stubs were omitted from the SM90 wheel's CMakeLists.
-6. Added C++ stubs for those two symbols and attempted source rebuild
-   targeting only SM86. Even with `THREADS=2`, the nvcc `cicc` processes
-   for `es_fp8_blockwise.cu` alone consumed 4–7 GB of RAM each; four
-   simultaneous processes saturated 32 GB RAM + 2 GB swap, OOM-killing
-   Pulsar and the build. sgl-kernel 0.5.x needs ~60–100 GB RAM to build
-   all kernels.
+Numbers (Qwen2.5-1.5B / bf16 / 3080 Ti, 2048 doc tokens, 4 agents,
+max_new=1, triton backend + no CUDA graph):
 
-**Conclusion**: sgl_kernel source build is infeasible on a 32 GB box unless
-single-threaded (which would take ~6–8 hours per rebuild). A pre-built SM86
-wheel from the sgl-kernel maintainers is the only practical path. Skipping
-SGLang comparison; the vLLM numbers stand on their own.
+| engine | median (s) | vs hf-eager |
+|--------|----------:|------------:|
+| hf-eager (sequential for-loop) | 0.674 | 1.00× (floor) |
+| sglang-radix | 0.259 | **2.60×** |
+| vllm-prefix (batched) | 0.023 | **28.98×** |
 
-**Unblocking path requires one of:**
-- Upgrade nvcc to 12.8+ on the GPU box (`sudo apt install cuda-toolkit-12-8`
-  or the .run installer), OR
-- Pin sgl-kernel to a pre-CUDA-12.8 version that compiles cleanly on
-  12.4 (probably 0.3.x era, but sglang-proper ≥0.5 needs 0.5-era
-  kernels, creating a version-pin rabbit hole), OR
-- Rent a Hopper GPU (H100) where the SM100 wheels work.
+The sglang-radix 2.60× is expected: RadixAttention fires on the shared
+prefix from the second request onward, but agents run sequentially here.
+vllm-prefix 28.98× stacks prefix caching + continuous batching + FA2
+kernels — not a clean "cache-alone" number (see the honesty note in
+"Single-process engine ceiling").
 
-The `bench_engines.py sglang-radix` path is scaffolded and invocable
-on a machine with a working sgl-kernel. **Do NOT treat SGLang numbers
-in this document as measured — there are none.**
+**History of the sgl_kernel struggle** (kept for posterity):
+
+1. Precompiled wheels target SM100 (Hopper) only; SM86 prebuilts had
+   undefined SM100 symbols at import time.
+2. Source build (v0.5.x) needs libnuma-dev + libibverbs-dev + CMake 3.x
+   + nvcc; `cicc` uses 4–7 GB RAM per thread and OOM-killed the build
+   on a 32 GB box.
+3. ABI mismatch: `sgl_kernel==0.4.1` requires `torch==2.9.1` while
+   vLLM requires `torch==2.10.0`. Separate venv sidesteps the conflict.
 
 ## What this proves
 
@@ -259,14 +254,21 @@ instance with `enable_prefix_caching=True`.
 
 On Qwen2.5-1.5B / bf16 / 3080 Ti / 1 new token:
 
-| agents | doc tok | hf-eager (seq) | hf-oracle (seq, PKV reuse) | vllm-prefix (batched) | vllm vs hf-eager |
-|-------:|--------:|---------------:|---------------------------:|----------------------:|-----------------:|
-|      2 |    2048 |         265 ms |                     171 ms |                 19 ms |           13.4× |
-|      2 |    4096 |         517 ms |                     305 ms |                 25 ms |           20.4× |
-|      4 |    2048 |         518 ms |                     207 ms |                 23 ms |           23.0× |
-|      4 |    4096 |       1 032 ms |                     345 ms |                 21 ms |           49.0× |
-|      8 |    2048 |       1 036 ms |                     276 ms |                 31 ms |           34.0× |
-|      8 |    4096 |       2 064 ms |                     427 ms |                 42 ms |           48.6× |
+| agents | doc tok | hf-eager (seq) | hf-oracle (seq, PKV reuse) | vllm-prefix (batched) | sglang-radix (seq) † | vllm vs hf-eager |
+|-------:|--------:|---------------:|---------------------------:|----------------------:|---------------------:|-----------------:|
+|      2 |    2048 |         265 ms |                     171 ms |                 19 ms |                    — |           13.4× |
+|      2 |    4096 |         517 ms |                     305 ms |                 25 ms |                    — |           20.4× |
+|      4 |    2048 |         518 ms |                     207 ms |                 23 ms |              259 ms |           23.0× |
+|      4 |    4096 |       1 032 ms |                     345 ms |                 21 ms |                    — |           49.0× |
+|      8 |    2048 |       1 036 ms |                     276 ms |                 31 ms |                    — |           34.0× |
+|      8 |    4096 |       2 064 ms |                     427 ms |                 42 ms |                    — |           48.6× |
+
+**†** sglang-radix run from `.venv-sglang` (torch 2.9.1 + sglang 0.5.10 +
+sglang-kernel 0.4.1) with `--attention-backend triton --disable-cuda-graph`.
+Sequential dispatch (no continuous batching), so it compares to hf-eager
+directionally: 674 ms (eager) → 259 ms (radix), **2.60×**. The 4-agent /
+2048-token row shows radix cache firing from the second request onward;
+remaining cells not measured.
 
 For an honest **"prefix cache alone"** isolation, see the "Ceiling
 comparison: vLLM internal prefix cache vs EdgeServeKVConnector"

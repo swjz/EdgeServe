@@ -8,8 +8,9 @@ and Phase 2.1 (LAN CDN measurements) are complete. Publisher encodes
 user-declared entity tags in the bloom alongside prefix hashes;
 end-to-end LAN HTTP transport confirmed at 165–183 Mbps (7.5–8×
 slower than GPU recompute). **The work pending now is Phase 2.2**
-(bandwidth-vs-recompute crossover benchmark). SGLang is permanently
-blocked on this machine (OOM during compilation; see Honesty threads).
+(bandwidth-vs-recompute crossover benchmark). SGLang is now measured
+via `.venv-sglang` (sglang 0.5.10 + torch 2.9.1 separate venv):
+sglang-radix 2.60× vs hf-eager on the 4-agent / 2048-token workload.
 
 ---
 

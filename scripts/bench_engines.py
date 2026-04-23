@@ -11,8 +11,8 @@ reports wall-clock wins vs the no-cache floor:
   * vllm-prefix      vLLM with enable_prefix_caching=True running all
                      agents sequentially in one process. Exercises vLLM's
                      built-in radix prefix cache.
-  * sglang-radix     (If sglang is installed.) Same idea, SGLang's
-                     RadixAttention.
+  * sglang-radix     SGLang's RadixAttention. Requires .venv-sglang
+                     (torch 2.9.1) — run separately from vLLM/HF engines.
 
 This is orthogonal to the Phase-3 multi-process benchmark. That one
 tests our cross-process cache routing; this one tests what single-process
@@ -20,10 +20,17 @@ engines can already do with their own caches on the same workload -- the
 ceiling we want to approach across processes.
 
 Usage:
-    python scripts/bench_engines.py \\
+    # vLLM / HF engines (use .venv):
+    .venv/bin/python scripts/bench_engines.py \\
         --model Qwen/Qwen2.5-1.5B --doc-tokens 4096 \\
         --num-agents 4 --dtype bf16 \\
-        --engines hf-eager,hf-oracle,vllm-prefix,sglang-radix
+        --engines hf-eager,hf-oracle,vllm-prefix
+
+    # SGLang engine (use .venv-sglang — different torch version):
+    .venv-sglang/bin/python scripts/bench_engines.py \\
+        --model Qwen/Qwen2.5-1.5B --doc-tokens 4096 \\
+        --num-agents 4 --dtype bf16 \\
+        --engines sglang-radix
 
 Each engine is loaded only if selected in --engines.
 """
@@ -135,44 +142,41 @@ def bench_vllm_prefix(model_id, dtype, doc_ids, suffixes, max_new, gpu_mem) -> d
 
 
 # ---------------------------------------------------------------------------
-# SGLang baseline (optional; installed separately).
+# SGLang baseline.
+# sglang-kernel 0.4.1 requires torch==2.9.1 which conflicts with vLLM's
+# torch==2.10.0. Run this benchmark from .venv-sglang, not .venv:
+#
+#   .venv-sglang/bin/python scripts/bench_engines.py \
+#       --engines sglang-radix --model ... --doc-tokens ... --num-agents ...
+#
+# See CLAUDE.md "Two virtual environments" for setup instructions.
 
-def bench_sglang_radix(model_id, dtype, doc_ids, suffixes, max_new) -> dict:
-    """Run the same workload through sglang's offline Engine.
-
-    RadixAttention (sglang's prefix cache equivalent) is ON by default.
-
-    Caveat: sglang 0.5+ JIT-compiles CUDA kernels via flashinfer / sgl_kernel
-    that `#include <concepts>` -- a C++20 header. Ubuntu 20.04 ships gcc 9.x
-    which doesn't have it. If the underlying box only has gcc 9 and sudo is
-    not available, sglang will fail on first `.generate()` with
-    `fatal error: concepts: No such file or directory`. Install gcc-11+
-    (apt, conda, or spack) and re-run.
-    """
+def bench_sglang_radix(model_id, dtype, doc_ids, suffixes, max_new,
+                       gpu_mem: float = 0.5) -> dict:
+    """Run the sglang-radix workload. Must be called from .venv-sglang."""
     from sglang.srt.entrypoints.engine import Engine
 
+    dtype_map = {'bf16': 'bfloat16', 'fp16': 'float16', 'fp32': 'float32'}
     engine = Engine(
         model_path=model_id,
-        dtype=dtype,
-        mem_fraction_static=0.5,
+        dtype=dtype_map.get(dtype, dtype),
+        mem_fraction_static=gpu_mem,
         log_level='error',
         attention_backend='triton',
         disable_cuda_graph=True,
     )
     try:
         sp = {'max_new_tokens': max_new, 'temperature': 0.0}
-        # Warmup pass.
+        # Warmup: one request so the radix tree is primed.
         engine.generate(input_ids=[list(doc_ids) + list(suffixes[0])],
                         sampling_params=sp)
-        # Timed pass: all N requests at once, so radix cache hits on the
-        # shared prefix across them.
-        start = time.perf_counter()
+        # Timed: all N agents share the doc prefix — radix cache fires.
+        t0 = time.perf_counter()
         engine.generate(
             input_ids=[list(doc_ids) + list(s) for s in suffixes],
             sampling_params=sp,
         )
-        wall = time.perf_counter() - start
-        return {'time_s': wall}
+        return {'time_s': time.perf_counter() - t0}
     finally:
         try:
             engine.shutdown()
@@ -286,8 +290,9 @@ def main():
             elif name == 'sglang-radix':
                 out = bench_sglang_radix(
                     args.model,
-                    {'fp32': 'float32', 'fp16': 'float16', 'bf16': 'bfloat16'}[args.dtype],
+                    args.dtype,
                     doc_ids, suffixes, args.max_new_tokens,
+                    gpu_mem=args.gpu_memory_utilization,
                 )
                 times.append(out['time_s'])
             else:

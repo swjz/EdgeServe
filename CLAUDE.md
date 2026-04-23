@@ -13,6 +13,27 @@ pip3 install -r requirements.txt
 pip3 install -e .
 ```
 
+### Two virtual environments
+
+There are **two separate venvs** in this repo — use the right one:
+
+| venv | Purpose | torch |
+|------|---------|-------|
+| `.venv/` | Everything: vLLM, EdgeServe, all benchmarks | `torch==2.10.0+cu128` |
+| `.venv-sglang/` | SGLang only (`sglang==0.5.10`, `sglang-kernel==0.4.1`) | `torch==2.9.1+cu128` |
+
+**Default: always use `.venv/`.**  
+`.venv-sglang/` is only used when running SGLang-specific benchmarks. sglang-kernel 0.4.1 pins `torch==2.9.1` which is incompatible with vLLM 0.19.1 (`torch==2.10.0`), hence the split.
+
+Recreate `.venv-sglang/` from scratch:
+```bash
+python3 -m venv .venv-sglang
+.venv-sglang/bin/pip install torch torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/cu128
+.venv-sglang/bin/pip install sglang==0.5.10.post1 sglang-kernel==0.4.1 \
+  --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
 Runtime requires a Pulsar broker reachable at e.g. `pulsar://localhost:6650`. Launch a standalone dev broker via:
 
 ```bash
