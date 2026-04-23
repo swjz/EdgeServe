@@ -232,46 +232,47 @@ favor of real measurements (already superseded by 2.1).
 
 Goal: context server holds far more KV than fits on its GPU.
 
-### 3.1 — Design doc for eviction policy 🔲 pending
+### 3.1 — Design doc for eviction policy ✅ done (2026-04-23)
 
-Short appendix (~150–250 lines, add to DESIGN.md or separate file).
-Cover:
-- Tier capacities (GPU / pinned CPU / NVMe).
-- Promotion rules: on hit, move up one tier (L3→L2→L1) when space
-  permits; stay-in-place otherwise.
-- Eviction rules: LRU within tier; demote on pressure; tombstone on
-  full-evict below L3.
-- Tombstone broadcast: new `CacheHeader.deleted=True` flag vs.
-  separate tombstone topic? Prefer the flag, reuse existing
-  subscription.
+Policy is documented in DESIGN.md "Tiered storage" section. Key decisions:
+- L1 = vLLM's paged buffer (we don't manage it).
+- L2 = in-process pinned bytes (OrderedDict LRU), served zero-copy by HTTP server.
+- L3 = NVMe files at `local_cache_path` (existing). Always written on publish.
+- Tombstone = `CacheHeader.deleted=True` broadcast on Pulsar (reuses topic).
 
-### 3.2 — L1/L2/L3 backing store 🔲 pending
+### 3.2 — L1/L2/L3 backing store ✅ done (2026-04-23)
 
-- L1 = GPU paged-buffer (already owned by vLLM; no change).
-- L2 = pinned CPU tensors on the context server (new), mmap-backed
-  so HTTP serving is zero-copy.
-- L3 = NVMe file (already the current local_cache_path).
+`edgeserve/semantic_cache/tiered_store.py` — `TieredStore` class:
+- `put(uuid, data)` → always writes L3; inserts L2 if capacity permits.
+- `get(uuid)` → L2 hit (no I/O) or L3 hit (file read + async L2 promotion).
+- `peek_l2(uuid)` → bytes or None, no disk I/O.
+- `evict(uuid)` → removes all tiers, fires tombstone callback.
+- `stats` property for tier occupancy monitoring.
 
-Write `edgeserve/semantic_cache/tiered_store.py` wrapping
-`CacheHttpServer.write_block` with tier-aware routing.
+`CacheHttpServer` updated: checks `store.peek_l2()` before disk; adds
+`X-Cache-Tier` response header. `SemanticCacheClient` routes `publish()`
+through `TieredStore.put()` when a store is attached.
 
-### 3.3 — Hit promotion + miss-path fill 🔲 pending
+### 3.3 — Hit promotion + miss-path fill ✅ done (2026-04-23)
 
-On hit at L2/L3, schedule promotion to L1 (async, only if L1 has
-room). On miss, new publish lands at L1; existing L1 entries demote
-to L2 under pressure.
+L3 hits async-promote to L2 via background thread (50 ms poll interval);
+`promote_async=False` for tests. New publishes land in both L2 and L3.
 
-### 3.4 — Tombstone propagation 🔲 pending
+### 3.4 — Tombstone propagation ✅ done (2026-04-23)
 
-On eviction below L3 (entry is gone for good), broadcast a tombstone
-header so consumers don't chase dead pointers. Consumer-side catalog
-removes the tombstoned block_uuid from local maps.
+`CacheHeader.deleted` field added (backward-compatible via `msgpack.get`).
+`HeaderCatalog._run()` removes deleted UUIDs from `_headers` instead of
+inserting. `SemanticCacheClient._publish_tombstone()` broadcasts a minimal
+deleted header. `TieredStore.on_tombstone` callback wired automatically
+when client instantiates with a store.
 
 ### 3.5 — Benchmark tier hit rates under realistic workload 🔲 pending
 
 Zipfian workload: 100 distinct documents, skewed access pattern.
-Measure L1 / L2 / L3 hit rates and miss rate; compare total
-throughput vs. a single-tier (L1-only) baseline.
+Measure L2 / L3 hit rates and miss rate; compare total throughput vs.
+a single-tier baseline. Script: `scripts/bench_tier_hit_rates.py` (not
+yet written). The `TieredStore.stats` property gives per-tier occupancy;
+need to add per-operation counters for a proper hit-rate curve.
 
 ### 3.6 — Experiment 3: Tool-call eviction buffer 🔲 pending (needs 3.1–3.4)
 
