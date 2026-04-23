@@ -177,44 +177,61 @@ def cmd_consume(args):
     # 2. Otherwise, tokenize the document and compute all block-boundary hashes.
     # (Entity-tag lookup is skipped: set_next_request_entities does not cross
     # the vLLM EngineCore subprocess boundary, so the bloom only has prefix hashes.)
-    if args.prefix_hash:
-        probe_entities = [args.prefix_hash]
-        print(f"Using supplied prefix hash: {args.prefix_hash}")
-    else:
-        doc = DOC_CHUNK * args.doc_repeats
-        prompt = doc + ' Summarise the key points.'
-        print(f"Tokenizing document ({len(prompt)} chars) to build prefix-hash probes ...")
-        probe_entities = _compute_prefix_hashes(args.model, prompt)
-
-    print(f"Waiting for a matching header (up to {args.wait}s) ...")
-    deadline = time.time() + args.wait
-    header = None
-    while time.time() < deadline:
-        for entity in probe_entities:
-            hits = list(client.catalog.lookup([entity]))
-            if hits:
-                header = hits[0]
-                print(f"  matched on entity={entity[:16]}...")
-                break
-        if header is not None:
-            break
-        time.sleep(1.0)
-
-    if header is None:
-        print(f"[ERROR] no header found within {args.wait}s")
+    # Fast path: caller already knows block UUID + node URI (skip Pulsar discovery).
+    # Useful when the catalog subscription cursor state is stale (Pulsar durable
+    # subscriptions remember the cursor; a previous run's ack advances it past the
+    # message, making a new connection with InitialPosition.Earliest see nothing).
+    if args.block_uuid and args.node_uri:
+        from edgeserve.semantic_cache.header import CacheHeader
+        import uuid as _uuid
+        header = CacheHeader(
+            block_uuid=_uuid.UUID(args.block_uuid),
+            node_uri=args.node_uri,
+            prefix_hash=b'',
+            bloom=None,  # type: ignore[arg-type]
+            num_tokens=0,
+        )
+        print(f"Direct fetch mode: {args.node_uri}/cache/{args.block_uuid}")
         client.close()
-        return
+    else:
+        if args.prefix_hash:
+            probe_entities = [args.prefix_hash]
+            print(f"Using supplied prefix hash: {args.prefix_hash}")
+        else:
+            doc = DOC_CHUNK * args.doc_repeats
+            prompt = doc + ' Summarise the key points.'
+            print(f"Tokenizing document ({len(prompt)} chars) to build prefix-hash probes ...")
+            probe_entities = _compute_prefix_hashes(args.model, prompt)
 
-    print(f"Header found: block_uuid={header.block_uuid}  "
-          f"node_uri={header.node_uri}  num_tokens={header.num_tokens}")
-    print(f"hostname={header.hostname!r}  local_path={header.local_path!r}")
+        print(f"Waiting for a matching header (up to {args.wait}s) ...")
+        deadline = time.time() + args.wait
+        header = None
+        while time.time() < deadline:
+            for entity in probe_entities:
+                hits = list(client.catalog.lookup([entity]))
+                if hits:
+                    header = hits[0]
+                    print(f"  matched on entity={entity[:16]}...")
+                    break
+            if header is not None:
+                break
+            time.sleep(1.0)
+
+        client.close()
+
+        if header is None:
+            print(f"[ERROR] no header found within {args.wait}s")
+            return
+
+    print(f"Header: block_uuid={header.block_uuid}  node_uri={header.node_uri}")
     print()
 
     # Warm up DNS / TCP
     from edgeserve.semantic_cache.http_client import http_fetch
     print("Warming up connection ...")
     try:
-        http_fetch(header.node_uri, header.block_uuid, timeout=10.0)
+        data = http_fetch(header.node_uri, header.block_uuid, timeout=30.0)
+        print(f"  warmup: {len(data)/1e6:.1f} MB")
     except Exception as e:
         print(f"[WARN] warmup fetch failed: {e}")
 
@@ -223,7 +240,7 @@ def cmd_consume(args):
     for i in range(args.repeats):
         t0 = time.perf_counter()
         try:
-            data = http_fetch(header.node_uri, header.block_uuid, timeout=30.0)
+            data = http_fetch(header.node_uri, header.block_uuid, timeout=60.0)
             elapsed = (time.perf_counter() - t0) * 1000
             times.append(elapsed)
             blob_mb = len(data) / 1e6
@@ -236,13 +253,11 @@ def cmd_consume(args):
     if times:
         import statistics
         med = statistics.median(times)
-        print(f"\nBlob size:  {len(data)/1e6:.1f} MB")
+        blob_mb = len(data) / 1e6
+        print(f"\nBlob size:  {blob_mb:.1f} MB")
         print(f"Median:     {med:.1f} ms")
         print(f"Min/max:    {min(times):.1f} / {max(times):.1f} ms")
-        blob_mb = len(data) / 1e6
         print(f"Throughput: {blob_mb * 8000 / med:.0f} Mbps (median)")
-
-    client.close()
 
 
 def main():
@@ -266,6 +281,10 @@ def main():
                     help='Same doc-repeats as seeder')
     cp.add_argument('--prefix-hash', default='',
                     help='Exact prefix hash (skip tokenization if known)')
+    cp.add_argument('--block-uuid', default='',
+                    help='Block UUID for direct fetch (skip Pulsar discovery)')
+    cp.add_argument('--node-uri', default='',
+                    help='HTTP node URI for direct fetch (skip Pulsar discovery)')
     cp.add_argument('--wait', type=float, default=60.0,
                     help='Seconds to wait for header')
     cp.add_argument('--repeats', type=int, default=5,

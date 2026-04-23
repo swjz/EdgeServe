@@ -353,6 +353,7 @@ class _Scheduler:
         if not user_ents and _NEXT_REQUEST_ENTITIES:
             user_ents = _NEXT_REQUEST_ENTITIES
             _NEXT_REQUEST_ENTITIES = frozenset()  # consume once
+            _REQUEST_ENTITIES[request.request_id] = user_ents  # persist for build_connector_meta
         if user_ents:
             hits = self._client.client.catalog.lookup(user_ents)
             if hits:

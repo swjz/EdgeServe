@@ -279,9 +279,10 @@ Both landed.
 ## What this run does NOT demonstrate
 
 - **Cross-host speedup.** All workers here share one GPU + localhost.
-  On a real LAN the HTTP roundtrip is slower by a few ms; on WAN it's
-  much slower. A follow-up on LAN (Mac Mini ↔ 3080 Ti) would quantify
-  this honestly.
+  LAN results (Mac Mini ↔ 3080 Ti) are now in the "Phase 2: LAN CDN
+  transport" section: 179 Mbps sustained, 10.5s for a 234.9 MB blob,
+  5.9× slower than recompute on a home LAN. Crossover requires ≥ 1 Gbps
+  network or a CPU-only consumer (14× benefit at 50 tok/s prefill).
 
 - **EdgeServe routing on top of vLLM.** The Phase-3 numbers above use
   `HFEngine`; the raw per-agent prefill is much slower than vLLM. A
@@ -603,6 +604,77 @@ integration.
   batch together. Semantic Cache Routing still helps in the case vLLM
   can't: multiple distinct vLLM instances on different boxes sharing
   context.
+
+## Phase 2: LAN CDN transport (Mac Mini ↔ GPU box)
+
+### Setup
+
+| node | hardware | role |
+|------|----------|------|
+| GPU box (`swjz-ubuntu`, 192.168.1.214) | RTX 3080 Ti, Python HTTP server | seeder |
+| Mac Mini (`teds-mac-mini`, 192.168.1.185) | Apple M2, no GPU | consumer |
+
+Seeder ran `demo_kvconnector_lan.py seed` with Qwen2.5-1.5B / 256 doc-repeats
+(8448 prompt tokens). KV blob was published to Pulsar and served over the HTTP
+server (Python `http.server`, `Content-Length` streaming, port 37423).
+
+Consumer used `http_fetch()` from `edgeserve.semantic_cache.http_client` — a
+plain `urllib.request.urlopen` call.
+
+### HTTP fetch results (blob = 234.9 MB, 8448-token KV)
+
+| fetch | time (ms) | throughput |
+|------:|----------:|-----------:|
+| 1     | 10 525    | 179 Mbps   |
+| 2     | 10 438    | 180 Mbps   |
+| 3     | 10 316    | 182 Mbps   |
+| 4     | 10 253    | 183 Mbps   |
+| 5     | 11 105    | 169 Mbps   |
+| 6     | 11 222    | 167 Mbps   |
+| 7     | 11 421    | 165 Mbps   |
+| **median** | **10 526** | **179 Mbps** |
+
+Blob size: 234.9 MB = 8448 tokens × Qwen2.5-1.5B bf16 KV cache.
+
+### Crossover analysis
+
+Seeder prefill (GPU box, 1780 ms for 8448 tokens) vs consumer HTTP fetch
+(10 526 ms). **Fetch is 5.9× slower than recompute on this home LAN.**
+
+| metric | value |
+|--------|-------|
+| LAN sustained throughput | 179 Mbps (≈ 22.5 MB/s) |
+| KV density | ≈ 27.8 KB/token (1.5B model, bf16) |
+| GPU prefill rate | ≈ 4 740 tokens/s (3080 Ti) |
+| Equivalent network prefill rate | ≈ 810 tokens/s |
+| **Fetch vs recompute ratio** | **5.9× slower** |
+
+The ratio is constant across context lengths because both fetch and recompute
+scale linearly with token count for this model (MLP dominates compute; KV size
+scales linearly). The crossover therefore does NOT exist on this home LAN for a
+3080 Ti — fetch is always ~6× slower.
+
+### When does fetch beat recompute?
+
+The crossover requires the network to be faster than the GPU's prefill in
+tokens/second-equivalent terms:
+- For fetch to win: network_throughput / kv_density > gpu_prefill_rate
+- i.e.: network_throughput > 4 740 tokens/s × 27.8 KB/token = 132 MB/s = **1.05 Gbps**
+
+A 10 GbE link saturated at 1.2 GB/s would give equivalent prefill of ~43 000 tokens/s
+— ~9× faster than the GPU. Or, on a CPU-only edge device prefilling at ~50 tokens/s,
+the 179 Mbps LAN is already **14× faster** than recompute. The CDN economics shift
+dramatically by deployment context.
+
+### Notes
+
+- The Python `http.server` backend likely caps throughput; the actual LAN link
+  (measured by iperf3) would be higher. A production server (nginx, asyncio,
+  sendfile) would reduce fetch time substantially.
+- Pulsar catalog discovery was confirmed working via local test (GPU box):
+  `catalog.lookup(hash)` returns the header within 3s. The Mac Mini consumer
+  had a stale subscription cursor issue (Pulsar durable subscriptions remember
+  the cursor across reconnects); the direct-fetch path was used for these numbers.
 
 ## Reproducing
 
