@@ -362,7 +362,26 @@ in-datacenter solutions" checkbox.
 
 ---
 
-## Phase 6 — End-to-end edge inference demo (NEXT PRIORITY)
+## Phase 6 — End-to-end edge inference demo ✅ DONE (2026-04-24)
+
+`scripts/demo_edge_inference.py` with seed/query/selftest subcommands.
+Mac Mini (M4, MPS fp16) consumer fetches KV from GPU box (RTX 3080 Ti)
+over wired gigabit LAN; query text and generated tokens never leave Mac.
+
+**Headline results at 64 doc-repeats (5 632 tokens):**
+- B0 (Mac local prefill + decode): **14.6 s**
+- EdgeServe (fetch + cast + decode): **3.98 s**
+- Speedup: **3.67×**  Token match: **✓ bit-exact**
+- Wire throughput: **935 Mbps** (close to gigabit line rate)
+- 161.5 MB KV blob fetched in 1.38 s
+
+At 256 repeats (22.5 k tokens): MPS B0 produces numerically broken
+output (fp16 overflow), while EdgeServe produces a coherent answer in
+14.4 s (5.6 s fetch + 8.8 s quadratic MPS decode).  See RESULTS.md §6.
+
+### Remaining Phase 6 sub-tasks
+
+
 
 **Goal:** close the gap between the architecture thesis ("decode at the edge, prefill
 near the data") and what's currently demonstrated. Every existing demo runs inference
@@ -374,7 +393,7 @@ The Mac cannot run vLLM (no CUDA). Use `HFEngine` + `kv_io.load_past_key_values_
 on the consumer side. This path already works (it's what `demo_kvconnector_lan.py`
 uses for the Mac) but has not been wired into a full interactive inference demo.
 
-### 6.1 — Mac consumer: KV-injected HF inference 🔲
+### 6.1 — Mac consumer: KV-injected HF inference ✅ done (2026-04-24)
 
 Pipeline:
 1. GPU box (context server): ingests a large document. Connector publishes KV to
@@ -400,7 +419,7 @@ After Q1+A1, the conversation prefix grows. Measure second-query latency when th
 new delta (Q1+A1, a few hundred tokens) is the only cold portion.
 Shows that the KV CDN compounds benefits across turns.
 
-### 6.3 — Privacy claim writeup 🔲
+### 6.3 — Privacy claim writeup ✅ done (in RESULTS.md §6 "Privacy narrative")
 
 Document what crosses the wire in the EdgeServe model vs. the cloud-API model:
 - Cloud API: prompt + context sent to remote server; generated tokens returned.

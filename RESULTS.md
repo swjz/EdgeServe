@@ -628,6 +628,13 @@ server (Python `http.server`, `Content-Length` streaming, port 37423).
 Consumer used `http_fetch()` from `edgeserve.semantic_cache.http_client` — a
 plain `urllib.request.urlopen` call.
 
+**Update 2026-04-24:** With the Mac wired to the router over Ethernet
+(instead of Wi-Fi), throughput jumps to **935–940 Mbps sustained** — the
+full gigabit link, **5.2× the Wi-Fi baseline**.  At 256 doc-repeats the
+645.9 MB blob transfers in 5.5 s instead of 11 s.  See "Phase 6" below
+for the updated measurements.  The home-LAN figures in this section
+reflect the original Wi-Fi measurement, kept for comparison.
+
 ### HTTP fetch results (blob = 234.9 MB, 8448-token KV)
 
 | fetch | time (ms) | throughput |
@@ -936,6 +943,105 @@ GPU prefill. The architectural win is **ingest at 44ms** while the server
 is warm: each code edit costs only one light prefill, and the KV is ready
 before the user asks their question. At longer contexts (≥4k tokens) the
 restore speedup matches the 1.41× seen in Phase 3.6.
+
+## Phase 6 — End-to-end edge inference (Mac ↔ GPU box over wired LAN)
+
+**Date:** 2026-04-24. Script: `scripts/demo_edge_inference.py`.
+Seeder: GPU box (RTX 3080 Ti, CUDA), HFEngine bf16.
+Consumer: Mac Mini (Apple M4, MPS fp16).
+Network: wired gigabit LAN, Mac Mini directly plugged in to the router.
+
+This is the demo the KV-CDN thesis is really about: **the user's query
+and the generated tokens never leave the Mac.**  Only the document is
+prefilled on the remote context server.
+
+### Pipeline
+
+```
+Mac user types query
+      ↓
+Mac fetches KV blob for the document from GPU box over HTTPS-equivalent LAN
+      ↓
+Mac casts KV to fp16, injects into HF past_key_values
+      ↓
+Mac decodes answer locally from just the query suffix (~23 tokens)
+      ↓
+Answer printed on Mac.  Query text + answer never crossed the LAN.
+```
+
+### Measurements
+
+| doc-repeats | ~doc tokens | blob MB | B0 (Mac local) | ES fetch+deser | ES decode | ES total | Speedup | Token match |
+|------------:|-----------:|--------:|---------------:|---------------:|----------:|---------:|--------:|:-----------:|
+| 64  |  5 632 | 161.5 |     14 595 ms |     1 430 ms |    2 549 ms |    **3 978 ms** | **3.67×** | ✓ bit-exact |
+| 128 | 11 264 | 323.0 | (MPS fp16 overflow — garbage output) | 2 871 ms | 4 586 ms | **7 457 ms** | ≥ qualitative win | — |
+| 256 | 22 528 | 645.9 | ≥53 900 ms (Phase 2.2c) | 5 608 ms | 8 757 ms | **14 365 ms** | **≥3.75×** | — |
+
+Each row is a single clean run.  EdgeServe answer (64 repeats): bit-exact
+match to the B0 answer on the same Mac.  LAN throughput saturated
+gigabit at **935–940 Mbps** across all three runs.
+
+### Why the long-context rows don't show B0
+
+MPS fp16 attention at 11k+ tokens on Qwen2.5-1.5B produces numerically
+broken output (saw `'! 2020, 1000000000000000000000...'`).  Bumping to
+fp32 on MPS triples VRAM and takes so long the baseline isn't
+interesting.  The EdgeServe path produces correct answers in both
+regimes because the KV was computed on CUDA bf16 (numerically stable)
+and only decode runs on MPS — decoding a 23-token suffix stays within
+MPS's numerical sweet spot.
+
+### Speedup breakdown (64 repeats)
+
+| stage | time | % of EdgeServe total |
+|-------|----:|---------------------:|
+| HTTP fetch 161.5 MB at 935 Mbps | 1 382 ms | 35 % |
+| safetensors deserialise | 34 ms | < 1 % |
+| dtype cast bf16→fp16 | 14 ms | < 1 % |
+| MPS suffix decode (23+20 tokens) | 2 549 ms | 64 % |
+| **EdgeServe total** | **3 978 ms** | 100 % |
+| (B0 full prefill on Mac, same config) | 14 595 ms | — |
+
+Decode, not fetch, is the dominant cost — suggesting the CDN story
+is compute-bound on the Mac rather than network-bound.  On a faster
+edge GPU (Jetson, or wired M4 Max with more MPS throughput) the
+EdgeServe total would drop below 2 s.
+
+### Privacy narrative (verified)
+
+What crosses the LAN in the EdgeServe path:
+- Client → server: HTTP GET `/cache/{block_uuid}` (one request)
+- Server → client: raw KV bytes (safetensors blob)
+- Neither direction carries the user's query or generated tokens.
+
+What a cloud-API path would send:
+- Client → server: full prompt (doc + user query)
+- Server → client: generated tokens
+- Both the query and the response cross the wire.
+
+### Reproducing
+
+```bash
+# GPU box
+python scripts/demo_edge_inference.py seed \
+    --model Qwen/Qwen2.5-1.5B --doc-repeats 64 \
+    --pulsar-url pulsar://localhost:6650
+# Copy the block_uuid and node_uri it prints
+
+# Mac Mini (wired LAN)
+python scripts/demo_edge_inference.py query \
+    --pulsar-url pulsar://GPU_BOX_IP:6650 \
+    --topic kvcache-edge-XXXX \
+    --block-uuid XXX \
+    --node-uri http://GPU_BOX_IP:PORT \
+    --model Qwen/Qwen2.5-1.5B --doc-repeats 64
+```
+
+Self-test on GPU box (same-host mmap path, no LAN):
+```bash
+python scripts/demo_edge_inference.py selftest \
+    --model Qwen/Qwen2.5-1.5B --doc-repeats 64
+```
 
 ## Reproducing
 

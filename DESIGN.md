@@ -222,10 +222,11 @@ edit, not per token; this doesn't saturate the upstream link.
 
 What remains (ordered gap list for the paper):
 
-1. **End-to-end edge inference demo** — a user on the Mac types a query; Mac
+1. ~~**End-to-end edge inference demo** — a user on the Mac types a query; Mac
    fetches KV from GPU box; Mac generates answer locally; prompt and tokens
-   never leave the Mac. Currently every demo runs inference on the GPU box.
-   This is the single demo that proves the thesis. → Phase 6.
+   never leave the Mac.~~ ✅ **Done 2026-04-24** — `scripts/demo_edge_inference.py`,
+   3.67× speedup at 64 doc-repeats with bit-exact token match over wired
+   gigabit LAN.  See RESULTS.md §Phase 6.
 
 2. **LMCache direct comparison** — same workload, both systems, side-by-side
    TTFT and cold-node discovery latency. Required by any systems reviewer.
@@ -318,7 +319,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | Tiered storage delivers LRU hit rates under Zipfian load | Phase 3.5 hit-rate sweep | ✅ RESULTS §3.5 | §eval.tiers |
 | NVMe persistence survives GPU eviction, speedup on restore | Phase 3.6 tool eviction | ✅ RESULTS §3.6 | §eval.eviction |
 | Context-push pipeline (edit → ingest → restore) works | Phase 4.4 end-to-end demo | ✅ RESULTS §4 | §eval.contextpush |
-| **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | 🔲 TODO §6 | §eval.privacy |
+| **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | ✅ RESULTS §6 (3.67× at 64 repeats, bit-exact token match) | §eval.privacy |
 | **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | 🔲 TODO §7.1 | §eval.baselines |
 | **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
@@ -326,8 +327,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 
 **Priority order for next work sessions:**
 
-1. Phase 6 (end-to-end Mac demo) — closes the thesis-vs-demo gap; builds
-   the figure the paper's introduction should show.
+1. ~~Phase 6 (end-to-end Mac demo)~~ ✅ **done 2026-04-24**.
 2. Phase 7.1 (B1 framing) — one extra row in the existing results table;
    directly addresses the "why not just use vLLM APC" reviewer question.
 3. Phase 7.2 (LMCache) — required for any systems venue submission.
