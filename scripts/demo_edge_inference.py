@@ -255,14 +255,21 @@ def cmd_query(args, *, same_host_path: str | None = None):
     full_tokens = doc_tokens + suffix_tokens
 
     # ── B0: full local prefill ─────────────────────────────────────────────
-    print(f'B0 baseline: prefilling {len(full_tokens)} tokens (doc + question)...')
-    t0 = time.perf_counter()
-    b0_generated, _ = engine.generate(full_tokens, max_new_tokens=args.max_new_tokens)
-    b0_ms = (time.perf_counter() - t0) * 1000
-    b0_answer = engine.detokenize(b0_generated)
-    print(f'  time:   {b0_ms:.0f} ms')
-    print(f'  answer: {b0_answer[:200]!r}')
-    print()
+    if args.skip_baseline:
+        print(f'B0 baseline: SKIPPED  (--skip-baseline; full_tokens={len(full_tokens)})')
+        b0_ms = float('nan')
+        b0_answer = '(skipped)'
+        b0_generated = []
+        print()
+    else:
+        print(f'B0 baseline: prefilling {len(full_tokens)} tokens (doc + question)...')
+        t0 = time.perf_counter()
+        b0_generated, _ = engine.generate(full_tokens, max_new_tokens=args.max_new_tokens)
+        b0_ms = (time.perf_counter() - t0) * 1000
+        b0_answer = engine.detokenize(b0_generated)
+        print(f'  time:   {b0_ms:.0f} ms')
+        print(f'  answer: {b0_answer[:200]!r}')
+        print()
 
     # ── EdgeServe: discover → fetch → inject → decode suffix ──────────────
     print('EdgeServe path:')
@@ -281,48 +288,55 @@ def cmd_query(args, *, same_host_path: str | None = None):
         blob_mb = os.path.getsize(local_path) / 1e6
         print(f'  loaded {blob_mb:.1f} MB in {fetch_ms:.0f} ms')
     else:
-        # Real mode: Pulsar catalog discovery + HTTP fetch
-        from edgeserve.semantic_cache.catalog import HeaderCatalog
-
-        node_id = f'edge-query-{_uuid_mod.uuid4().hex[:8]}'
-        print(f'  connecting to Pulsar at {args.pulsar_url}, topic {args.topic!r} ...')
-        catalog = HeaderCatalog(
-            args.pulsar_url, node_id=node_id,
-            topic=args.topic, ttl_ms=30 * 60 * 1000,
-        )
-
-        # Probe using block-boundary hashes (longest first) — seeder published
-        # the full set so any boundary will match.
-        print(f'  computing {len(doc_tokens)//16} block-boundary hashes...')
-        hashes = _boundary_hashes(doc_tokens)
-
-        t_disc = time.perf_counter()
-        header = None
-        deadline = time.time() + args.wait
-        while time.time() < deadline and header is None:
-            for h in hashes:
-                hits = list(catalog.lookup([h]))
-                if hits:
-                    header = hits[0]
-                    break
-            if header is None:
-                time.sleep(1.0)
-        disc_ms = (time.perf_counter() - t_disc) * 1000
-        catalog.close()
-
-        if header is None:
-            print(f'  ERROR: no KV found within {args.wait}s')
-            return
-        print(f'  found: block_uuid={header.block_uuid}  ({disc_ms:.0f} ms discovery)')
-
+        # Real mode: get header from catalog (unless --block-uuid given for direct fetch)
+        import uuid as _uuid
         from edgeserve.semantic_cache.http_client import http_fetch
-        node_uri = args.node_uri or header.node_uri
-        if args.node_uri and args.node_uri != header.node_uri:
-            print(f'  fetching from {node_uri}  (override; header said {header.node_uri})')
+
+        if args.block_uuid and args.node_uri:
+            # Direct-fetch fast path (catalog bypass; useful when Pulsar
+            # message retention has expired or cursor state is stale).
+            print(f'  direct fetch: block_uuid={args.block_uuid}')
+            print(f'                node_uri={args.node_uri}')
+            block_uuid = _uuid.UUID(args.block_uuid)
+            disc_ms = 0.0
         else:
-            print(f'  fetching from {node_uri} ...')
+            from edgeserve.semantic_cache.catalog import HeaderCatalog
+
+            node_id = f'edge-query-{_uuid_mod.uuid4().hex[:8]}'
+            print(f'  connecting to Pulsar at {args.pulsar_url}, topic {args.topic!r} ...')
+            catalog = HeaderCatalog(
+                args.pulsar_url, node_id=node_id,
+                topic=args.topic, ttl_ms=30 * 60 * 1000,
+            )
+            print(f'  computing {len(doc_tokens)//16} block-boundary hashes...')
+            hashes = _boundary_hashes(doc_tokens)
+
+            t_disc = time.perf_counter()
+            header = None
+            deadline = time.time() + args.wait
+            while time.time() < deadline and header is None:
+                for h in hashes:
+                    hits = list(catalog.lookup([h]))
+                    if hits:
+                        header = hits[0]
+                        break
+                if header is None:
+                    time.sleep(1.0)
+            disc_ms = (time.perf_counter() - t_disc) * 1000
+            catalog.close()
+
+            if header is None:
+                print(f'  ERROR: no KV found within {args.wait}s')
+                print(f'  (tip: pass --block-uuid XXX --node-uri http://HOST:PORT '
+                      f'to skip catalog discovery)')
+                return
+            block_uuid = header.block_uuid
+            print(f'  found: block_uuid={block_uuid}  ({disc_ms:.0f} ms discovery)')
+
+        node_uri = args.node_uri or header.node_uri  # type: ignore[name-defined]
+        print(f'  fetching from {node_uri} ...')
         t_fetch = time.perf_counter()
-        kv_bytes = http_fetch(node_uri, header.block_uuid, timeout=180.0)
+        kv_bytes = http_fetch(node_uri, block_uuid, timeout=180.0)
         fetch_ms = (time.perf_counter() - t_fetch) * 1000
         blob_mb = len(kv_bytes) / 1e6
         throughput = blob_mb * 8000 / fetch_ms if fetch_ms > 0 else 0
@@ -375,15 +389,20 @@ def cmd_query(args, *, same_host_path: str | None = None):
     print(f'Query suffix tokens:     {len(suffix_tokens):>6}')
     print(f'Generated tokens:        {args.max_new_tokens:>6}')
     print()
-    print(f'B0  full local prefill:  {b0_ms:>8.0f} ms')
+    import math
+    if math.isnan(b0_ms):
+        print(f'B0  full local prefill:  (skipped)')
+    else:
+        print(f'B0  full local prefill:  {b0_ms:>8.0f} ms')
     if same_host_path is not None:
         print(f'ES  mmap load:           {fetch_ms:>8.0f} ms')
     else:
         print(f'ES  fetch + deserialise: {fetch_ms:>8.0f} ms')
     print(f'ES  decode (suffix only):{decode_ms:>8.0f} ms')
     print(f'ES  total:               {es_total_ms:>8.0f} ms')
-    print(f'Speedup  (B0 / ES):      {b0_ms/es_total_ms:>8.2f}×')
-    if token_match is not None:
+    if not math.isnan(b0_ms):
+        print(f'Speedup  (B0 / ES):      {b0_ms/es_total_ms:>8.2f}×')
+    if token_match is not None and not math.isnan(b0_ms):
         match_str = '✓ bit-exact' if token_match else (
             '~ close  (minor float-precision diff — answers semantically identical)'
         )
@@ -490,6 +509,12 @@ def main():
     qp.add_argument('--node-uri', default='',
                     help='Override HTTP URI from catalog header '
                          '(e.g. http://192.168.1.214:42597 when DNS is wrong)')
+    qp.add_argument('--block-uuid', default='',
+                    help='Skip catalog discovery, fetch this block directly. '
+                         'Requires --node-uri.')
+    qp.add_argument('--skip-baseline', action='store_true',
+                    help='Skip B0 local prefill (useful on slow edge devices '
+                         'where MPS fp16 is numerically unstable at long context)')
 
     tp = sub.add_parser('selftest', help='Single-machine integration test')
     tp.add_argument('--model', default='Qwen/Qwen2.5-1.5B')
