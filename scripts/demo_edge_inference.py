@@ -316,9 +316,13 @@ def cmd_query(args, *, same_host_path: str | None = None):
         print(f'  found: block_uuid={header.block_uuid}  ({disc_ms:.0f} ms discovery)')
 
         from edgeserve.semantic_cache.http_client import http_fetch
-        print(f'  fetching from {header.node_uri} ...')
+        node_uri = args.node_uri or header.node_uri
+        if args.node_uri and args.node_uri != header.node_uri:
+            print(f'  fetching from {node_uri}  (override; header said {header.node_uri})')
+        else:
+            print(f'  fetching from {node_uri} ...')
         t_fetch = time.perf_counter()
-        kv_bytes = http_fetch(header.node_uri, header.block_uuid, timeout=180.0)
+        kv_bytes = http_fetch(node_uri, header.block_uuid, timeout=180.0)
         fetch_ms = (time.perf_counter() - t_fetch) * 1000
         blob_mb = len(kv_bytes) / 1e6
         throughput = blob_mb * 8000 / fetch_ms if fetch_ms > 0 else 0
@@ -483,6 +487,9 @@ def main():
     qp.add_argument('--query', default=DEFAULT_QUERY)
     qp.add_argument('--max-new-tokens', type=int, default=80)
     qp.add_argument('--wait', type=float, default=120.0)
+    qp.add_argument('--node-uri', default='',
+                    help='Override HTTP URI from catalog header '
+                         '(e.g. http://192.168.1.214:42597 when DNS is wrong)')
 
     tp = sub.add_parser('selftest', help='Single-machine integration test')
     tp.add_argument('--model', default='Qwen/Qwen2.5-1.5B')
