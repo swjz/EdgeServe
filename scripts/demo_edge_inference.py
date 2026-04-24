@@ -109,25 +109,37 @@ def _detect_device():
 
 
 def _cast_kv(kv_cache, dtype):
-    """Cast every tensor in an HF past_key_values to dtype in-place."""
-    import torch
+    """Cast every tensor in an HF past_key_values to dtype.
+
+    Handles three forms:
+      - transformers >=4.57 DynamicCache (exposes .layers[i].keys/.values, no key_cache)
+      - transformers 4.36-4.56 DynamicCache (has .key_cache / .value_cache)
+      - legacy tuple-of-(k, v)
+    """
     if kv_cache is None:
         return None
-    try:
-        from transformers import DynamicCache
-        if isinstance(kv_cache, DynamicCache):
-            cache = DynamicCache()
-            for i in range(len(kv_cache)):
-                cache.update(
-                    kv_cache.key_cache[i].to(dtype),
-                    kv_cache.value_cache[i].to(dtype),
-                    i,
-                )
-            return cache
-    except (ImportError, AttributeError):
-        pass
+
+    # 4.57+ form: .layers
+    if hasattr(kv_cache, 'layers'):
+        for layer in kv_cache.layers:
+            if layer.keys is not None and layer.keys.dtype != dtype:
+                layer.keys = layer.keys.to(dtype)
+            if layer.values is not None and layer.values.dtype != dtype:
+                layer.values = layer.values.to(dtype)
+        return kv_cache
+
+    # 4.36-4.56 form: .key_cache / .value_cache
+    if hasattr(kv_cache, 'key_cache') and hasattr(kv_cache, 'value_cache'):
+        for i in range(len(kv_cache.key_cache)):
+            if kv_cache.key_cache[i].dtype != dtype:
+                kv_cache.key_cache[i] = kv_cache.key_cache[i].to(dtype)
+            if kv_cache.value_cache[i].dtype != dtype:
+                kv_cache.value_cache[i] = kv_cache.value_cache[i].to(dtype)
+        return kv_cache
+
+    # Legacy tuple
     return tuple(
-        tuple(t.to(dtype) for t in layer)
+        tuple(t.to(dtype) for t in layer[:2])
         for layer in kv_cache
     )
 
@@ -350,22 +362,14 @@ def cmd_query(args, *, same_host_path: str | None = None):
         fetch_ms += deser_ms   # include deserialisation in the "fetch" bucket
         print(f'  deserialised in {deser_ms:.0f} ms')
 
-    # Cast KV dtype to match the local model (seeder may use bf16; Mac uses fp16)
-    seeder_sample = None
-    try:
-        from transformers import DynamicCache
-        if isinstance(kv_cache, DynamicCache) and kv_cache.key_cache:
-            seeder_sample = kv_cache.key_cache[0]
-    except (ImportError, AttributeError, IndexError):
-        pass
-    if seeder_sample is None and kv_cache:
-        try:
-            seeder_sample = kv_cache[0][0]
-        except (TypeError, IndexError):
-            pass
-    if seeder_sample is not None and seeder_sample.dtype != dtype:
-        kv_cache = _cast_kv(kv_cache, dtype)
-        print(f'  cast KV: {seeder_sample.dtype} → {dtype}')
+    # Cast KV dtype to match the local model (seeder uses bf16 on CUDA;
+    # Mac MPS consumer uses fp16; CPU consumer uses fp32).  Always cast
+    # unconditionally — the helper is a no-op when dtypes already match.
+    t_cast = time.perf_counter()
+    kv_cache = _cast_kv(kv_cache, dtype)
+    cast_ms = (time.perf_counter() - t_cast) * 1000
+    print(f'  cast KV to {dtype} ({cast_ms:.0f} ms)')
+    fetch_ms += cast_ms
 
     # Decode only the question suffix with cached doc KV
     print(f'  generating answer ({len(suffix_tokens)} suffix tokens + '
