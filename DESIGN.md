@@ -1,25 +1,31 @@
-# DESIGN — KV-Cache CDN for Edge LLM Serving
+# DESIGN — Semantic Inference Artifact CDN for Edge LLM/VLM/VLA Serving
 
 *EdgeServe-v2.* A natural extension of EdgeServe (Shaowang & Krishnan,
 [arxiv 2303.08028](https://arxiv.org/pdf/2303.08028.pdf)) from routing
 streaming feature data and model outputs across edge nodes to routing
-**KV-cache blocks** across edge nodes for large language model
-serving.
+**validated inference artifacts** across edge nodes for large language
+and vision-language model serving. KV-cache blocks are the flagship
+artifact and the current implementation focus; the same discovery plane
+also applies to token/block manifests, multimodal encoder outputs,
+context packs, deterministic tool artifacts, and eventually static
+visual state in VLA control loops.
 
 ---
 
 ## Thesis
 
-**Decode wants to live at the edge; prefill wants to live next to the
-data. KV cache is the transfer asset that bridges them, discovered
-probabilistically by semantic entity.**
+**Live decode and control want to live at the edge; expensive context
+processing wants to live next to the data. Validated inference artifacts
+are the transfer assets that bridge them, discovered probabilistically
+by semantic entity and reused only after exact compatibility checks.**
 
-Small-to-medium LLMs running on local hardware (M-series Macs,
-prosumer GPUs, eventually phones) are viable for interactive tasks but
-are starved on long-context prefill. A 50 k-token codebase that a
-developer wants to analyze takes seconds-to-minutes to prefill even on
-a 3080 Ti; it takes a fraction of a second to *decode one more answer*
-from a cached context.
+Small-to-medium LLMs/VLMs running on local hardware (M-series Macs,
+prosumer GPUs, eventually phones and robots) are viable for interactive
+decode/control but are starved on large context processing. A 50 k-token
+codebase, high-resolution document image, or static camera scene can be
+expensive to tokenize, encode, prefill, or analyze repeatedly; it is much
+cheaper to discover and reuse the validated artifact produced by a nearby
+context node.
 
 This inverts the usual cloud-API pattern. The natural architecture is:
 
@@ -28,24 +34,25 @@ This inverts the usual cloud-API pattern. The natural architecture is:
   the wire.
 - **Context/prefill server** on the nearby network: holds the user's
   working set (codebase, documents, long conversation history), runs
-  prefill when the working set changes, serves KV-cache blocks on
+  context processing when the working set changes, serves artifacts on
   request.
 - **Discovery fabric**: a lightweight catalog so the edge node can ask
-  "does any nearby server already hold KV for `file_diff_v2.py` at
-  revision `abc123`?" before paying for prefill itself.
+  "does any nearby server already hold an artifact for `file_diff_v2.py`
+  at revision `abc123` under this model/tokenizer?" before paying to
+  materialize the context itself.
 
-Put together, it is a **content-distribution network for KV caches**:
+Put together, it is a **content-distribution network for inference artifacts**:
 
-| CDN concept | KV-cache CDN analogue |
+| CDN concept | inference-artifact CDN analogue |
 |---|---|
-| Origin server | Context server (holds durable KV over tiered storage) |
+| Origin server | Context server (holds durable artifacts over tiered storage) |
 | Edge PoP | Edge inference node (decode, near user) |
-| Cacheable asset | Per-entity KV-cache block |
+| Cacheable asset | KV block, token manifest, visual tokens, tool/context artifact |
 | URL / content ID | Semantic entity tag `(entity, model, version, sha)` |
 | Cache-control / TTL | Catalog header timestamp + TTL |
 | DNS / edge selection | Bloom-filter catalog lookup |
-| Origin-pull | Edge pulls KV on demand from context server |
-| Origin write-through | Edge pushes changed working-set files to context server; context server re-prefills in background |
+| Origin-pull | Edge pulls artifact on demand from context server |
+| Origin write-through | Edge pushes changed working-set files/assets to context server; context server recomputes artifacts in background |
 
 Why bloom filters specifically: in a many-entity, many-node fabric,
 most lookups are misses (the agent asks about some doc that hasn't
@@ -80,12 +87,12 @@ Typical setup (LAN-scale edge, the design's target):
 │  edge device        │ ◄───────────────────────┤  context server        │
 │  (Mac, prosumer PC) │                         │  (home rack / office)  │
 │                     │                         │                        │
-│  • decode           │  header broadcast       │  • prefill             │
-│  • user prompt in   │  (Pulsar pub/sub)       │  • KV L1 (GPU)         │
-│  • generated tokens │ ◄───────────────────────┤  • KV L2 (CPU RAM)     │
-│    out (stay local) │                         │  • KV L3 (NVMe)        │
+│  • decode           │  header broadcast       │  • artifact compute    │
+│  • user prompt in   │  (Pulsar pub/sub)       │  • L1 hot KV/visual    │
+│  • generated tokens │ ◄───────────────────────┤  • L2 CPU RAM          │
+│    out (stay local) │                         │  • L3 NVMe             │
 │                     │                         │                        │
-│  • local radix      │  KV pull on hit         │  • HTTP server         │
+│  • local radix      │  artifact pull on hit   │  • HTTP server         │
 │    prefix cache     │ ◄───────────────────────┤    (mmap safetensors)  │
 └─────────────────────┘                         └────────────────────────┘
                                                              ▲
@@ -116,10 +123,37 @@ Typical setup (LAN-scale edge, the design's target):
 
 ---
 
+## Artifact classes
+
+The paper should present KV cache as the first implemented artifact,
+not the only artifact. The unifying rule is: artifacts are discovered
+semantically but reused only when exact artifact-specific metadata
+matches.
+
+| artifact | semantic key | exact validation before reuse | why it matters | status |
+|---|---|---|---|---|
+| Text KV-cache block | `codebase:linux@vX`, `doc:id@sha` | model/checkpoint, tokenizer, block size, content SHA, block-aligned token-prefix hash | avoids repeated long-context prefill | built + evaluated |
+| Token/block manifest | same entity + tokenizer | content SHA, tokenizer version, token ids or boundary hashes | lets cold edge decide hit/miss without downloading raw context | planned |
+| Context pack | repo snapshot, RAG bundle, prompt template version | file/content SHAs, retrieval policy, prompt serializer, tokenizer | avoids repeated repo/RAG assembly and tokenization | planned |
+| Multimodal encoder output / visual tokens | `image:sha`, `pdf_page:sha`, `scene:id@ts` | encoder model, preprocessing pipeline, resolution/crop, asset SHA | avoids repeated image/video/document encoding across questions | planned |
+| Multimodal KV/prefix state | visual asset + text prefix entity | VLM checkpoint, projector/encoder, tokenizer, visual token layout, text prefix hash | same asset, many questions; analogous to text KV | planned |
+| RAG/document chunk KV | `rag_chunk:id@sha`, `repo_chunk:path@sha` | chunk SHA, chunk order/position policy, tokenizer, recompute/fusion policy | avoids repeated document-side work when chunks recur across queries | related-work baseline first |
+| VLA static-scene state | `scene:id@time-window`, `robot:task:env` | VLA checkpoint, camera calibration, frame SHA/window, action head/version | avoids re-encoding static visual regions across control steps | future target |
+| Deterministic tool artifact | `repo:index@sha`, `test:result@sha`, `ast:path@sha` | tool version, command/config, input content SHA | avoids repeated static analysis, indexing, test summarization | planned |
+| Structured-decoding artifact | schema/tool name + schema SHA | tokenizer, decoding backend, schema grammar/mask hash | avoids recompiling JSON/schema grammars | lower priority |
+
+This broader framing still preserves the correctness boundary: semantic
+meaning gets the requester to a small candidate set; exact hashes decide
+whether an artifact can be used.
+
+---
+
 ## Economic case — when this pays off
 
-The question is always: **is fetching KV faster than recomputing it
-locally?**
+For KV cache, the question is: **is fetching KV faster than recomputing
+prefill locally?** For other artifacts, replace "prefill" with the
+artifact's local materialization cost: tokenization, repo/RAG assembly,
+vision encoding, schema compilation, or deterministic tool execution.
 
 Let `C(doc, model, edge_hw)` be local prefill wall-time for a context
 on the edge device, and `T(KV_size, bandwidth)` be transfer time. We
@@ -293,7 +327,9 @@ What remains (ordered gap list for the paper):
   streaming model serving over Pulsar. This design reuses the
   catalog+pubsub substrate and extends the payload type to KV cache.
 
-- **vLLM prefix caching / RadixAttention** (Zheng et al., 2023): the
+- **vLLM prefix caching / RadixAttention**
+  ([design doc](https://docs.vllm.ai/en/latest/design/prefix_caching/)):
+  the
   in-process ceiling we ride on top of. Our work is strictly a *layer
   above* vLLM's own APC; when vLLM's cache hits, our layer is bypassed.
   Our connector adds +6–55 ms overhead vs. the internal APC — this is
@@ -322,7 +358,7 @@ What remains (ordered gap list for the paper):
 - **Coral** (NSDI '04) and **hierarchical web caches** (Squid, Varnish):
   bloom-filter-over-distributed-cache precedent. Coral filtered DHT lookups
   with per-node blooms to avoid network RTTs for cold misses. We apply the
-  same pattern to KV-cache discovery. The difference: our entities are
+  same pattern to inference-artifact discovery. The difference: our entities are
   semantic (model + content SHA) rather than URL hashes.
 
 - **PromptCache** (2023): caches KV for *schema-defined* prompt segments,
@@ -331,19 +367,72 @@ What remains (ordered gap list for the paper):
   across process and host boundaries, regardless of how the KV was
   generated. PromptCache could feed our catalog as a publisher.
 
+- **CacheBlend / KVLink for RAG KV reuse**
+  ([CacheBlend](https://arxiv.org/abs/2405.16444),
+  [KVLink](https://arxiv.org/html/2502.16002v2)): precompute or fuse
+  document-side KV when retrieved chunks recur across questions. They are
+  important context-pack baselines, especially for RAG. EdgeServe should
+  not claim to solve cache fusion quality; it should claim a discovery
+  layer that can find the right document/chunk artifacts before a cold edge
+  node downloads and tokenizes the full corpus.
+
+- **LMCache multimodal support**
+  ([blog](https://blog.lmcache.ai/en/2025/07/03/lmcache-extends-its-turbo-boost-to-multimodal-models-in-vllm-v1/)):
+  extends KV reuse to multimodal vLLM models by hashing image-side
+  multimodal tokens and caching their KV. This is the hard baseline for
+  VLM experiments. EdgeServe's differentiator is metadata-first discovery
+  across cold edge nodes and artifact classes, not merely "VLM KV reuse
+  exists." **Measurement needed:** Phase 7.5.
+
+- **NVIDIA NIM VLM KV reuse**
+  ([docs](https://docs.nvidia.com/nim/vision-language-models/latest/kv-cache-reuse.html)):
+  production evidence that VLM prefix/KV reuse matters when most of the
+  initial multimodal prompt is identical across requests. Treat as a
+  commercial exact-prefix reference point, not a distributed discovery
+  baseline unless the experiment runs on NIM.
+
+- **VL-Cache** (ICLR '25,
+  [abstract](https://proceedings.iclr.cc/paper_files/paper/2025/hash/00db17c36b5435195760520efa96d99c-Abstract-Conference.html)):
+  compresses VLM KV caches with modality-aware scoring and layer-adaptive
+  budgets. Complementary: it reduces the artifact size; EdgeServe
+  discovers and routes artifacts.
+
+- **VLA-Cache** (2025,
+  [arXiv](https://arxiv.org/html/2502.02175v2)): reuses static visual
+  tokens/KV across frames for vision-language-action robotic manipulation.
+  Same broad principle (static visual context should not be recomputed),
+  but the workload is robotics control rather than edge knowledge work.
+  Treat as related work unless we build a simulator/hardware VLA benchmark.
+
+- **OpenVLA**
+  ([project](https://openvla.github.io/),
+  [paper](https://proceedings.mlr.press/v270/kim25c.html)): a plausible
+  future VLA benchmark target because it is open, 7B-parameter, and trained
+  on large robot demonstration mixtures. It is not the next experiment:
+  VLA evaluation needs simulator/hardware traces and action success metrics,
+  so VLM document/image QA is the fairer near-term scope.
+
 ### How to differentiate (for the paper)
 
 The **central novelty claim** is the combination of:
-1. Semantic entity tagging (not raw URL or prefix hash) as the cache key,
-   enabling cache discovery even when the exact tokenized context is unknown.
+1. Semantic entity tagging as the discovery key for reusable inference
+   artifacts, enabling cache lookup even when the exact tokenized context
+   or visual-token sequence is not locally materialized yet.
 2. Bloom-filter broadcast over Pulsar for zero-configuration cross-node
    discovery — no central registry, no per-node config.
-3. Tiered storage (L2 RAM + L3 NVMe) on the context server for durability
+3. Exact artifact validation after discovery: model/checkpoint,
+   tokenizer or encoder/preprocessor, content SHA, and token/visual prefix
+   hashes must match before reuse.
+4. Tiered storage (L2 RAM + L3 NVMe) on the context server for durability
    across GPU eviction and process restarts.
-4. HTTP fallback transport that works over any LAN without RDMA fabric.
+5. HTTP fallback transport that works over any LAN without RDMA fabric.
 
-LMCache has (3) partially; NIXL has better (4) transport but not (1)/(2).
-No existing system combines all four for the edge LAN deployment context.
+LMCache overlaps heavily on KV storage and now multimodal KV reuse; NIXL has
+better same-host/datacenter transport; CacheBlend/KVLink optimize RAG
+document-KV reuse; VL-Cache/VLA-Cache optimize VLM/VLA artifact size or
+temporal reuse. EdgeServe's narrower claim is the discovery fabric: a cold
+edge node can find validated artifacts from compact semantic metadata before
+downloading or tokenizing huge text/visual contexts.
 
 ---
 
@@ -363,6 +452,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | ✅ RESULTS §2.3 B1 table (EdgeServe 7× slower than B1 same-host — this is expected and correct) | §eval.baselines |
 | **Correctness: Bloom false positives cannot inject wrong KV** | Phase 7.0 exact validation (header exact-match metadata + catalog post-filter + 17 unit tests) | ✅ tests/test_exact_validation.py | §eval.correctness |
 | Metadata-first discovery avoids raw-context materialization | Phase 7.4 remote corpus / cold-node lookup | 🔲 TODO §7.4 | §eval.discovery |
+| Semantic discovery extends to VLM visual artifacts | Phase 7.5 VLM asset-cache discovery | 🔲 TODO §7.5 | §eval.multimodal |
 | **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
 | CDN economics improve at 7B / 32k tokens | Phase 8.1–8.2 scale evaluation | 🔲 deferred | §eval.scale |
@@ -371,9 +461,11 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 
 1. ~~Phase 6 (end-to-end Mac demo)~~ ✅ **done 2026-04-24**.
 2. ~~Phase 7.1 (B1 framing)~~ ✅ **done 2026-04-27**.
-3. Phase 7.2 (LMCache) — required for any systems venue submission.
-4. Phase 7.3 (NIXL) — secondary; useful if we target a vLLM-aware audience.
-5. Phase 8 (scale) — deferred until better GPU hardware is available.
+3. Phase 7.4 (metadata-only Linux/repo discovery) — best broader-paper figure.
+4. Phase 7.5 (VLM visual artifact discovery) — broadens beyond text KV.
+5. Phase 7.2 (LMCache) — required for any systems venue submission.
+6. Phase 7.3 (NIXL) — secondary; useful if we target a vLLM-aware audience.
+7. Phase 8 (scale) — deferred until better GPU hardware is available.
 
 ---
 

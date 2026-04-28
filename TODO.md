@@ -1,16 +1,17 @@
-# TODO — KV-Cache CDN build-out
+# TODO — Semantic Inference Artifact CDN build-out
 
-Reorganized around the thesis in `DESIGN.md` (KV-cache CDN for edge
-LLM serving, EdgeServe-v2). Read `DESIGN.md` first.
+Reorganized around the thesis in `DESIGN.md`: EdgeServe-v2 is a
+semantic discovery fabric for validated inference artifacts at the edge.
+KV-cache blocks are the flagship implemented artifact; new Phase 7 work
+extends the paper story to token manifests, Linux-scale context packs,
+VLM visual artifacts, and deterministic tool artifacts.
 
-**Status snapshot (2026-04-23):** Phase 1 (entity-keyed discovery)
-and Phase 2.1 (LAN CDN measurements) are complete. Publisher encodes
-user-declared entity tags in the bloom alongside prefix hashes;
-end-to-end LAN HTTP transport confirmed at 165–183 Mbps (7.5–8×
-slower than GPU recompute). **The work pending now is Phase 2.2**
-(bandwidth-vs-recompute crossover benchmark). SGLang is now measured
-via `.venv-sglang` (sglang 0.5.10 + torch 2.9.1 separate venv):
-sglang-radix 2.60× vs hf-eager on the 4-agent / 2048-token workload.
+**Status snapshot (2026-04-28):** KV-cache routing, LAN edge inference,
+tiered storage, context push, B1 same-host framing, and multi-turn edge
+decode are complete. Immediate paper-work focus: exact validation after
+Bloom-positive lookup (7.0), metadata-only discovery over a pinned Linux
+context (7.4), VLM visual-artifact discovery (7.5), then LMCache/NIXL
+comparisons (7.2/7.3).
 
 ---
 
@@ -554,7 +555,8 @@ exact model/tokenizer/content/prefix validation gates the actual KV load.
 
 Experiment A — metadata-only lookup:
 - Context server has already prefetched and prefilled a large object
-  (repo dump, 100 MB document collection, or remote object-store blob).
+  (start with a pinned `torvalds/linux` tag/commit, then optionally a
+  100 MB document collection or remote object-store blob).
 - Edge node receives only `{entity, model_id, model_version, content_sha}`
   plus the user's query, not the raw document bytes.
 - EdgeServe path: Bloom/catalog lookup → exact metadata validation → KV fetch.
@@ -586,6 +588,70 @@ engineering.
 
 Deliverable: `scripts/bench_metadata_discovery.py` + RESULTS.md table:
 `system`, raw bytes needed before lookup, lookup latency, TTFT, correctness.
+
+### 7.5 — VLM visual-artifact discovery 🔲
+
+**Broaden beyond text KV.** VLM/VLA workloads have reusable visual context:
+the same document page, chart, screenshot, UI state, or static camera scene is
+often queried many times with different language suffixes. EdgeServe should
+index these artifacts by semantic asset metadata, then validate exact encoder
+and preprocessing metadata before reuse.
+
+Start with VLM, not VLA:
+- VLA workloads need robotics traces/simulation and action metrics.
+- VLM document/image QA can run on existing hardware and is easier to make
+  reproducible.
+- Treat VLA-Cache as related work until we have a simulator-backed benchmark.
+
+Experiment A — rendered Linux docs / diagrams:
+- Pin a Linux kernel version or commit.
+- Render selected kernel docs, config fragments, call graphs, or source-code
+  pages as images/PDF pages.
+- Context server encodes each asset and publishes artifact headers keyed by
+  `linux:<tag>:doc:<path>:page:<n>@sha=<asset_sha>`.
+- Multiple edge agents ask different questions about the same visual asset.
+- Metrics: visual bytes needed before lookup, image-encoder time, TTFT,
+  answer/logit correctness for same image+same query, and cache hit rate.
+
+Experiment B — visual-token / multimodal-KV cache:
+- Artifact choices, in increasing difficulty:
+  1. Visual encoder output / visual tokens.
+  2. Multimodal prefill KV for `image + fixed text prefix`.
+  3. VLA static-scene visual tokens across time steps.
+- Exact validation fields: VLM checkpoint, vision encoder/projector version,
+  image SHA, preprocessing pipeline, resize/crop policy, visual token layout,
+  tokenizer, and text-prefix hash when KV is reused.
+
+Baselines:
+- No-cache VLM: every query reprocesses the image/page.
+- vLLM/VLM prefix cache where available: same process, exact same multimodal
+  prompt, hard same-host ceiling.
+- NVIDIA NIM VLM KV reuse if available: production exact-prefix reference for
+  repeated multimodal prompts.
+- LMCache multimodal: hard external-cache baseline if the pinned vLLM/LMCache
+  versions support the target VLM.
+- EdgeServe: semantic asset lookup before raw image/document materialization,
+  then exact validation and artifact fetch.
+
+Expected result: EdgeServe's advantage should be in **metadata-first discovery
+and cold-edge setup**, not necessarily same-host warm-hit latency. A fair result
+may show LMCache/vLLM faster after the asset is already in-process, while
+EdgeServe requires fewer bytes and less configuration before a cold node can
+find the reusable artifact.
+
+Deliverable: `scripts/bench_vlm_artifact_discovery.py` + RESULTS.md table:
+`system`, bytes before lookup, visual encode time, lookup latency, TTFT,
+correctness, and notes on hardware/model fit.
+
+Related-work boundary for this phase:
+- vLLM/NVIDIA/LMCache already cover exact multimodal prompt/KV reuse. The
+  EdgeServe question is whether a cold edge node can find the reusable visual
+  artifact from compact semantic metadata before downloading/rendering the
+  image or PDF page.
+- VL-Cache is a compression baseline, not a discovery baseline. If used later,
+  it should reduce transferred artifact size under the same discovery protocol.
+- OpenVLA/VLA-Cache are future scope. Do not claim VLA results until we have
+  simulator or hardware traces plus action-success metrics.
 
 ---
 
@@ -641,6 +707,9 @@ Pulsar topic under N concurrent consumers; hit rate as fleet grows.
   Phase 4 (context-push) land.~~ ✅ Both phases complete (2026-04-23).
   TieredStore (L2 RAM + L3 NVMe), tombstone propagation, ContextServer
   ingest, and ContextWatcher are all implemented and demo'd.
+- **Broader artifact-CDN framing added (2026-04-28).** KV remains the
+  implemented flagship, but Phase 7.4/7.5 now test metadata-first discovery
+  for Linux-scale context manifests and VLM visual artifacts.
 - **SGLang: unblocked via separate venv (2026-04-23).** Installed
   sglang 0.5.10 + torch 2.9.1 in `.venv-sglang` (isolated from the
   main vLLM venv). sglang-radix measures 2.60× vs hf-eager on the
