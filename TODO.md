@@ -445,6 +445,29 @@ see? (Answer: the document text at ingest time; not the query or response.)
 
 These are the comparisons a systems conference reviewer will immediately ask for.
 
+### 7.0 — Exact validation after Bloom-positive lookup 🔲
+
+**Correctness blocker.** Today the catalog treats a Bloom-positive header as
+the cache-match decision. That is unsafe: Bloom filters have false positives,
+and a false-positive KV load can silently inject the wrong attention state.
+
+Keep Bloom filters as the scalable discovery prefilter, but require exact
+validation before the worker loads KV into the model:
+- Header/manifest fields: `model_id`, `model_version` or checkpoint hash,
+  tokenizer hash, block size, token-prefix hash for every published boundary,
+  content/entity SHA, and `num_tokens`.
+- Prefix-hash path: after Bloom says "maybe", verify the requested
+  block-aligned token hash is explicitly present in the header/manifest before
+  returning a hit to the scheduler.
+- Entity-tag path: after Bloom says "maybe", verify the exact entity key
+  `(entity, model_id, model_version, content_sha)` is present, and verify the
+  cached `num_tokens` is compatible with the consumer's requested prefix.
+- Negative test: force a tiny Bloom filter / high-FPR workload and prove the
+  connector falls back to miss instead of loading wrong KV.
+
+Deliverable: exact-match metadata in `CacheHeader` or a sidecar manifest,
+unit tests for false-positive rejection, and one end-to-end vLLM negative test.
+
 ### 7.1 — B1 honest same-host framing ✅ done (2026-04-27)
 
 `scripts/bench_b1_vllm_apc.py`.  Single vLLM with APC, same workload
@@ -457,25 +480,6 @@ as Phase 2.3 (4 agents, 6 272-token prefix).
 Conclusion recorded in RESULTS §Phase 2.3: EdgeServe does NOT beat B1
 on same host.  EdgeServe's niche is cross-host, process-restart, and
 edge devices that can't run vLLM.  Frame the paper around those three.
-
-B1 = single vLLM instance, `enable_prefix_caching=True`, serving all N agents
-via one `llm.generate(prompts=[...])` call (continuous batching).
-
-Run same workload as Phase 2.3 (N=4, 6k-token shared prefix):
-
-| system | mechanism | per-agent TTFT | notes |
-|--------|-----------|---------------:|-------|
-| B2 (N separate vLLM, no share) | N full prefills | 240 ms | current baseline |
-| EdgeServe cross-process | bloom lookup + NVMe restore | 176 ms (1.36×) | current result |
-| B1 (single vLLM, APC, batched) | internal radix cache | TBD — expected ~25 ms | the hard baseline |
-
-**Expected finding:** EdgeServe does NOT beat B1 on a single host. State this
-upfront. EdgeServe's niche is when N agents span multiple hosts, or when the edge
-device cannot run vLLM (Mac scenario). Framing the paper around this niche is
-stronger than overclaiming.
-
-Deliverable: one additional row in RESULTS.md §Phase 2.3 table + explicit framing
-paragraph.
 
 ### 7.2 — LMCache direct comparison 🔲
 
