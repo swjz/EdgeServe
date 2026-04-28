@@ -62,8 +62,27 @@ class SemanticCacheClient:
         data: bytes,
         prefix_tokens: Optional[bytes] = None,
         num_tokens: int = 0,
+        *,
+        user_entities: Optional[Iterable[str]] = None,
+        model_id: Optional[str] = None,
+        model_version: Optional[str] = None,
+        tokenizer_hash: Optional[str] = None,
+        block_size: int = 0,
     ) -> uuid.UUID:
         """Store ``data`` locally, then broadcast a header describing it.
+
+        ``entities`` populates both the bloom (for scalable discovery) and
+        the header's exact-match lists (for correctness validation on
+        bloom-positive candidates — see Phase 7.0).  Pass the full set of
+        block-boundary prefix hashes via ``entities``; pass user-declared
+        semantic tags (e.g. ``doc_id:wiki42``) via ``user_entities``.  Both
+        land in the bloom; the exact lists let downstream consumers tell a
+        true hit from a bloom false positive.
+
+        ``model_id`` / ``model_version`` / ``tokenizer_hash`` / ``block_size``
+        are engine provenance fields: consumers reject bloom-positive
+        candidates whose provenance disagrees, preventing cross-model or
+        cross-tokenizer KV transfer.
 
         Routes storage through the TieredStore if one is attached (L2 hot
         layer + L3 NVMe), otherwise writes directly to ``local_cache_path``.
@@ -76,8 +95,14 @@ class SemanticCacheClient:
         else:
             local_path = self.http.write_block(str(block_uuid), data)
 
+        # Normalise entity sets — the caller may pass generators.
+        prefix_hash_list = list(entities)
+        user_entity_list = list(user_entities) if user_entities else []
+
         bloom = SemanticBloomFilter.for_capacity(self.bloom_capacity)
-        for e in entities:
+        for e in prefix_hash_list:
+            bloom.add(e)
+        for e in user_entity_list:
             bloom.add(e)
 
         prefix_hash = hashlib.sha256(prefix_tokens).digest() if prefix_tokens else b''
@@ -89,6 +114,12 @@ class SemanticCacheClient:
             hostname=socket.gethostname(),
             local_path=os.path.abspath(local_path) if local_path else None,
             num_tokens=num_tokens,
+            model_id=model_id,
+            model_version=model_version,
+            tokenizer_hash=tokenizer_hash,
+            block_size=block_size,
+            prefix_hashes=prefix_hash_list,
+            entity_keys=user_entity_list,
         )
         self.publisher.publish(header)
         # Seed local catalog immediately so same-node resolve() works without

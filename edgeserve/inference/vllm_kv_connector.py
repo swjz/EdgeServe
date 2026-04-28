@@ -283,6 +283,33 @@ def _inject_kv_into_layer(
 # ---------------------------------------------------------------------------
 # Scheduler side: decides which requests need load vs store.
 
+def _engine_provenance(vllm_config: "VllmConfig", block_size: int) -> dict:
+    """Extract Phase-7.0 engine-provenance fields from a VllmConfig.
+
+    Any field we can't resolve becomes None (or 0 for block_size), which the
+    header validator treats as "don't care" on that dimension.  Callers pass
+    the returned dict as keyword args to publish() / catalog.lookup().
+    """
+    out = {
+        'model_id': None, 'model_version': None,
+        'tokenizer_hash': None, 'block_size': block_size,
+    }
+    try:
+        model_config = getattr(vllm_config, 'model_config', None)
+        if model_config is not None:
+            out['model_id'] = getattr(model_config, 'model', None)
+            # HF revision / commit; may be None for local paths.
+            out['model_version'] = getattr(model_config, 'revision', None)
+            # dtype disambiguates bf16 vs fp16 KV that would otherwise silently
+            # mix; fold it into model_version so mismatches force a miss.
+            dtype = getattr(model_config, 'dtype', None)
+            if dtype is not None:
+                out['model_version'] = f'{out["model_version"] or ""}+dtype={dtype}'
+    except Exception:
+        pass
+    return out
+
+
 class _Scheduler:
     def __init__(self, vllm_config: "VllmConfig",
                  kv_cache_config: "KVCacheConfig | None",
@@ -292,6 +319,7 @@ class _Scheduler:
         self._kv_cache_config = kv_cache_config
         self._client = client
         self._block_size = block_size
+        self._provenance = _engine_provenance(vllm_config, block_size)
         # request_id -> Request (we've decided to load external KV on this req)
         self._requests_need_load: dict[str, Any] = {}
         # request_id -> matched prefix length (in tokens) from the last
@@ -315,7 +343,21 @@ class _Scheduler:
         return self._hash_cache[str(key)]
 
     def _catalog_has(self, request_hash: str) -> bool:
-        hits = self._client.client.catalog.lookup({request_hash})
+        """Return True iff a catalog header exactly covers this prefix hash.
+
+        Phase 7.0: the catalog now post-filters bloom-positive candidates on
+        the publisher's explicit prefix-hash list AND on engine provenance
+        (model_id / model_version / block_size).  A bloom false positive or a
+        cross-model KV can no longer satisfy this check.
+        """
+        hits = self._client.client.catalog.lookup(
+            {request_hash},
+            exact_validate=True,
+            engine_model_id=self._provenance.get('model_id'),
+            engine_model_version=self._provenance.get('model_version'),
+            engine_tokenizer_hash=self._provenance.get('tokenizer_hash'),
+            engine_block_size=self._provenance.get('block_size', 0),
+        )
         return bool(hits)
 
     def _any_prefix_in_catalog(self, aligned_tokens: list) -> bool:
@@ -355,7 +397,14 @@ class _Scheduler:
             _NEXT_REQUEST_ENTITIES = frozenset()  # consume once
             _REQUEST_ENTITIES[request.request_id] = user_ents  # persist for build_connector_meta
         if user_ents:
-            hits = self._client.client.catalog.lookup(user_ents)
+            hits = self._client.client.catalog.lookup(
+                user_ents,
+                exact_validate=True,
+                engine_model_id=self._provenance.get('model_id'),
+                engine_model_version=self._provenance.get('model_version'),
+                engine_tokenizer_hash=self._provenance.get('tokenizer_hash'),
+                engine_block_size=self._provenance.get('block_size', 0),
+            )
             if hits:
                 best = hits[0]  # catalog ranks by most-recent
                 n = best.num_tokens
@@ -504,6 +553,7 @@ class _Worker:
         self._kv_cache_config = kv_cache_config
         self._client = client
         self._block_size = block_size
+        self._provenance = _engine_provenance(vllm_config, block_size)
         self._connector_metadata: Optional[EdgeServeKVMetadata] = None
         # request_hash -> {layer_name: cpu_tensor}. Accumulated across
         # save_kv_layer calls; flushed in wait_for_save.
@@ -641,19 +691,27 @@ class _Worker:
                 continue
             try:
                 blob = st_save(layers)
-                entities = self._multi_boundary_hashes(token_ids, req_hash)
-                # Also include user-declared semantic tags so entity-based
-                # consumers (those that know the doc_id but not the prefix hash)
-                # can find this entry via bloom intersection.
-                entities |= set(user_ents)
+                # Split the bloom entities into two buckets so the header can
+                # advertise explicit exact-match lists (Phase 7.0).  Prefix
+                # hashes are deterministic from the tokens; user_entities are
+                # whatever tags the caller attached via set_request_entities.
+                prefix_hashes = self._multi_boundary_hashes(token_ids, req_hash)
                 self._client.client.publish(
-                    entities, blob, num_tokens=len(token_ids),
+                    prefix_hashes,
+                    blob,
+                    num_tokens=len(token_ids),
+                    user_entities=set(user_ents),
+                    model_id=self._provenance.get('model_id'),
+                    model_version=self._provenance.get('model_version'),
+                    tokenizer_hash=self._provenance.get('tokenizer_hash'),
+                    block_size=self._provenance.get('block_size', 0),
                 )
                 logger.info(
                     'EdgeServe: published KV for hash=%s (%d layers, %.2f MB, '
-                    '%d prefix tags, %d entity tags)',
+                    '%d prefix tags, %d entity tags, model=%s)',
                     req_hash, len(layers), len(blob) / 1e6,
-                    len(entities) - len(user_ents), len(user_ents),
+                    len(prefix_hashes), len(user_ents),
+                    self._provenance.get('model_id'),
                 )
             except Exception as e:
                 logger.exception('EdgeServe publish failed: %s', e)

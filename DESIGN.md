@@ -55,6 +55,20 @@ any RPC. Precedent: Coral (NSDI '04) used bloom filters over a DHT for
 peer discovery exactly because central indexes don't scale for sparse
 lookups.
 
+**Correctness gate (Phase 7.0).**  Bloom filters have a non-zero
+false-positive rate by design, and blindly trusting a bloom-positive
+result would silently load the wrong KV into the model.  Every
+`CacheHeader` therefore carries explicit exact-match metadata
+alongside its bloom: the full list of published prefix hashes, the
+full list of user-declared entity tags, and engine provenance
+(`model_id`, `model_version` with dtype disambiguator, tokenizer hash,
+block size).  A bloom-positive candidate is admitted only if (a) the
+engine provenance matches and (b) every queried entity appears in one
+of the explicit lists.  The bloom stays as the scalable prefilter; the
+explicit lists are the correctness gate.  See
+`tests/test_exact_validation.py` for the false-positive-rejection
+stress tests.
+
 ---
 
 ## Deployment shape
@@ -347,6 +361,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | Context-push pipeline (edit → ingest → restore) works | Phase 4.4 end-to-end demo | ✅ RESULTS §4 | §eval.contextpush |
 | **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | ✅ RESULTS §6 (3.67× at 64 repeats, bit-exact token match) | §eval.privacy |
 | **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | ✅ RESULTS §2.3 B1 table (EdgeServe 7× slower than B1 same-host — this is expected and correct) | §eval.baselines |
+| **Correctness: Bloom false positives cannot inject wrong KV** | Phase 7.0 exact validation (header exact-match metadata + catalog post-filter + 17 unit tests) | ✅ tests/test_exact_validation.py | §eval.correctness |
 | Metadata-first discovery avoids raw-context materialization | Phase 7.4 remote corpus / cold-node lookup | 🔲 TODO §7.4 | §eval.discovery |
 | **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |

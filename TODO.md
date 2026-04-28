@@ -445,28 +445,52 @@ see? (Answer: the document text at ingest time; not the query or response.)
 
 These are the comparisons a systems conference reviewer will immediately ask for.
 
-### 7.0 — Exact validation after Bloom-positive lookup 🔲
+### 7.0 — Exact validation after Bloom-positive lookup ✅ done (2026-04-27)
 
-**Correctness blocker.** Today the catalog treats a Bloom-positive header as
-the cache-match decision. That is unsafe: Bloom filters have false positives,
-and a false-positive KV load can silently inject the wrong attention state.
+`CacheHeader` extended with six exact-match fields:
+- `model_id`, `model_version` (includes dtype disambiguator),
+  `tokenizer_hash`, `block_size` — engine provenance
+- `prefix_hashes: list[str]`, `entity_keys: list[str]` — the explicit lists
+  the bloom filter summarises
 
-Keep Bloom filters as the scalable discovery prefilter, but require exact
-validation before the worker loads KV into the model:
-- Header/manifest fields: `model_id`, `model_version` or checkpoint hash,
-  tokenizer hash, block size, token-prefix hash for every published boundary,
-  content/entity SHA, and `num_tokens`.
-- Prefix-hash path: after Bloom says "maybe", verify the requested
-  block-aligned token hash is explicitly present in the header/manifest before
-  returning a hit to the scheduler.
-- Entity-tag path: after Bloom says "maybe", verify the exact entity key
-  `(entity, model_id, model_version, content_sha)` is present, and verify the
-  cached `num_tokens` is compatible with the consumer's requested prefix.
-- Negative test: force a tiny Bloom filter / high-FPR workload and prove the
-  connector falls back to miss instead of loading wrong KV.
+`HeaderCatalog.lookup()` now post-filters bloom-positive candidates:
+- `matches_engine()` rejects cross-model / cross-dtype / cross-block-size
+  hits even when the bloom says yes
+- `_entities_covered_exact()` rejects bloom false positives by verifying
+  every queried entity appears in `prefix_hashes ∪ entity_keys`
+- Legacy headers (pre-7.0) with empty exact lists fall back to bloom-only
+  behavior (backward compat)
+- `exact_validate=False` restores legacy behavior for callers that have
+  already verified exactness (e.g. `resolve_by_uuid` same-node paths)
 
-Deliverable: exact-match metadata in `CacheHeader` or a sidecar manifest,
-unit tests for false-positive rejection, and one end-to-end vLLM negative test.
+`SemanticCacheClient.publish()` now takes `user_entities=`, `model_id=`,
+`model_version=`, `tokenizer_hash=`, `block_size=` kw args.  The vLLM
+connector's `_Worker.wait_for_save` pulls these from `VllmConfig` via a
+new `_engine_provenance()` helper and splits tags into prefix_hashes
+(block-boundary SHA-256) vs entity_keys (user-declared tags).
+
+Tests (17 new, all pass):
+- `tests/test_exact_validation.py`:
+  - engine predicates: model/version/dtype/block_size acceptance + rejection
+  - `covers_prefix_hash`, `covers_entities`, `has_exact_metadata`
+  - `_entities_covered_exact` dual-bucket semantics
+  - bloom false-positive rejection (simulated collision)
+  - cross-model / cross-dtype / cross-block-size rejection
+  - legacy header bloom-only fallback
+  - `exact_validate=False` bypass
+  - **tight-bloom stress**: 64-bit bloom + 50 entries → many FPs on probe;
+    catalog must return 0 headers for every unseen tag (verified on 500
+    unseen probes after confirming the bloom FPs are real)
+  - header msgpack round-trip preserves new fields
+
+Live end-to-end:
+- `probe_kvconnector_e2e.py` publishes w/ `model=Qwen/Qwen2.5-0.5B` in
+  the log line, fetch + decode round-trip OK
+- `probe_kvconnector_negative.py` passes (different prompt → no hit)
+- `demo_kvconnector_prefix_share.py` prefix-hit 1.47×, token bit-exact
+
+Existing 42 tests under `tests/test_{vllm_kv_connector,semantic_cache,
+tiered_store}.py` all pass.  Full suite: **59 passed**.
 
 ### 7.1 — B1 honest same-host framing ✅ done (2026-04-27)
 

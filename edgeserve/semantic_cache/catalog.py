@@ -9,6 +9,20 @@ from _pulsar import ConsumerType, InitialPosition
 from edgeserve.semantic_cache.header import CacheHeader
 
 
+def _entities_covered_exact(header: CacheHeader, entities: List[str]) -> bool:
+    """Every requested entity is present in the header's explicit lists.
+
+    We don't know at lookup time whether a requested tag is a prefix hash or a
+    user-declared entity; accept a match from either explicit list.  This is
+    the gate that turns a Bloom false-positive into a miss.
+    """
+    for e in entities:
+        if e in header.prefix_hashes or e in header.entity_keys:
+            continue
+        return False
+    return True
+
+
 class HeaderCatalog:
     """In-memory index of recent cache headers broadcast on a Pulsar topic.
 
@@ -67,17 +81,61 @@ class HeaderCatalog:
             for u in stale:
                 del self._headers[u]
 
-    def lookup(self, entities: Iterable[str]) -> List[CacheHeader]:
+    def lookup(
+        self,
+        entities: Iterable[str],
+        *,
+        exact_validate: bool = True,
+        engine_model_id: Optional[str] = None,
+        engine_model_version: Optional[str] = None,
+        engine_tokenizer_hash: Optional[str] = None,
+        engine_block_size: int = 0,
+    ) -> List[CacheHeader]:
         """Return headers whose bloom filter is positive for every entity.
 
-        Ranked by `rank_fn` descending (default: most-recent first).
+        Bloom filters have a nonzero false-positive rate.  When a header
+        carries Phase-7.0 exact-match metadata (``prefix_hashes`` /
+        ``entity_keys``), we treat the bloom as a prefilter and require that
+        every requested entity be present in the exact list as well.
+
+        Set ``exact_validate=False`` to get legacy bloom-only behavior (used
+        by the false-positive stress tests and by same-node-publisher
+        resolve-by-uuid paths that have already verified exactness).
+
+        Engine provenance filters (``engine_model_id``, ``engine_block_size``,
+        etc.) reject headers whose publisher differs on any non-empty field.
+        Pass ``None`` / ``0`` to skip that dimension.
+
+        Ranked by ``rank_fn`` descending (default: most-recent first).
         """
         ents = list(entities)
         with self._lock:
-            candidates = [
+            bloom_positive = [
                 h for h in self._headers.values()
                 if all(e in h.bloom for e in ents)
             ]
+
+        if exact_validate:
+            validated = []
+            for h in bloom_positive:
+                if not h.matches_engine(
+                    engine_model_id, engine_model_version,
+                    engine_tokenizer_hash, engine_block_size,
+                ):
+                    continue
+                # Exact-match gate: if the header advertises exact-match
+                # metadata, every requested entity MUST be explicitly listed.
+                # Legacy headers (pre-7.0) without exact metadata pass
+                # through on bloom alone — with a warning issued by the
+                # connector layer, not here.
+                if h.has_exact_metadata():
+                    if not _entities_covered_exact(h, ents):
+                        continue
+                validated.append(h)
+            candidates = validated
+        else:
+            candidates = bloom_positive
+
         candidates.sort(key=self.rank_fn, reverse=True)
         return candidates
 

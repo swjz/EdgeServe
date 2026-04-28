@@ -110,7 +110,7 @@ def test_scheduler_prefix_match_finds_longest():
     class FakeCatalog:
         def __init__(self, known_hashes):
             self._known = set(known_hashes)
-        def lookup(self, entities):
+        def lookup(self, entities, **kwargs):
             for e in entities:
                 if e in self._known:
                     return [object()]  # any truthy list
@@ -138,6 +138,11 @@ def test_scheduler_prefix_match_finds_longest():
     sched._requests_need_load = {}
     sched._matched_len = {}
     sched._hash_cache = {}
+    sched._entity_hit_uuid = {}
+    sched._provenance = {
+        'model_id': None, 'model_version': None,
+        'tokenizer_hash': None, 'block_size': 0,
+    }
 
     # Request is 80 tokens. Longest aligned = 64. The catalog doesn't have
     # hash(tokens[:64]); it has hash(tokens[:48]) and hash(tokens[:16]).
@@ -222,7 +227,7 @@ def test_entity_first_scheduler_path():
 
     # Wire a fake client whose catalog returns that header for any entity query
     class FakeCatalog:
-        def lookup(self, entities):
+        def lookup(self, entities, **kwargs):
             if DOC_TAG in entities:
                 return [header]
             return []
@@ -239,6 +244,12 @@ def test_entity_first_scheduler_path():
     sched._matched_len = {}
     sched._hash_cache = {}
     sched._entity_hit_uuid = {}
+    # _provenance defaults populated by __init__; since we used object.__new__
+    # we set an empty dict here (meaning "no engine-provenance filter").
+    sched._provenance = {
+        'model_id': None, 'model_version': None,
+        'tokenizer_hash': None, 'block_size': 0,
+    }
 
     class FakeRequest:
         request_id = REQUEST_ID
