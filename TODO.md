@@ -518,6 +518,51 @@ discovery removes per-node configuration; entity tagging for semantic lookup.
 Measure same-host warm hit latency for each connector at 5k and 20k tokens.
 Script: `scripts/bench_nixl_vs_edgeserve.py`.
 
+### 7.4 — Metadata-only discovery over huge remote context 🔲
+
+**Core paper differentiator.** Show that EdgeServe can discover the correct
+prefill node from a compact semantic handle without first downloading,
+tokenizing, or trie-walking the raw context on the edge.
+
+Correctness constraint: KV is still reused only when the exact token prefix is
+compatible. Semantic metadata narrows the search to candidate cache blocks;
+exact model/tokenizer/content/prefix validation gates the actual KV load.
+
+Experiment A — metadata-only lookup:
+- Context server has already prefetched and prefilled a large object
+  (repo dump, 100 MB document collection, or remote object-store blob).
+- Edge node receives only `{entity, model_id, model_version, content_sha}`
+  plus the user's query, not the raw document bytes.
+- EdgeServe path: Bloom/catalog lookup → exact metadata validation → KV fetch.
+- Prefix-only baseline: edge must fetch raw data or token ids first to construct
+  the prefix-trie/radix/APC lookup key, then either hit or recompute.
+- Metrics: bytes downloaded before hit decision, time-to-hit decision,
+  time-to-first-token, and edge CPU/tokenization cost.
+
+Experiment B — cold-node join:
+- Start a new edge node with empty local cache and no raw documents.
+- Measure time to discover and use an existing prefill block via only the
+  semantic entity header.
+- Compare against LMCache/vLLM/NIXL configurations where the new node needs
+  explicit cache-node configuration, raw-context materialization, or token
+  sequence construction before lookup.
+
+Experiment C — alias resolution:
+- Register multiple semantic aliases for the same content hash:
+  `file:<path>`, `repo:<name>@<commit>`, `url:<object>`, `vector_doc:<id>`.
+- Show all aliases resolve to the same validated `content_sha` and therefore
+  the same KV block when tokenization is identical.
+- Negative case: same entity label but different `content_sha` or tokenizer
+  version must miss.
+
+Expected result: EdgeServe wins on **lookup bandwidth and cold-node setup**,
+not necessarily on same-host warm-hit latency. This should be one of the main
+paper figures because it isolates the value of semantic indexing from transport
+engineering.
+
+Deliverable: `scripts/bench_metadata_discovery.py` + RESULTS.md table:
+`system`, raw bytes needed before lookup, lookup latency, TTFT, correctness.
+
 ---
 
 ## Phase 8 — Scale (deferred — needs A100 / H100 or multi-GPU)

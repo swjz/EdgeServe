@@ -160,6 +160,32 @@ Prefix-hash entities (what we have today) remain a fallback — if a
 consumer doesn't know the entity but does present the same tokenized
 prefix, the prefix-hash path still hits.
 
+### Discovery vs. reuse correctness
+
+Semantic entity tags are an **index**, not a license to reuse KV for
+arbitrary semantically similar text. KV cache reuse is only correct when
+the cached prefix is exactly compatible with the consumer's model state:
+same model checkpoint, same tokenizer, same block size, same content
+version, and the same block-aligned token prefix.
+
+The intended lookup pipeline is:
+
+1. **Metadata discovery.** The edge asks the catalog for
+   `(entity, model_id, model_version, content_sha)` and receives candidate
+   KV holders without downloading or tokenizing the full document first.
+2. **Exact validation.** Before loading KV, the consumer verifies exact
+   metadata: checkpoint/tokenizer identity, content hash, block-aligned
+   token-prefix hash, and `num_tokens`.
+3. **KV load.** Only after exact validation does the worker fetch the blob
+   and inject it into the model's paged buffer or HF cache.
+
+This is the key distinction from prefix-tree / radix-cache systems:
+prefix trees are excellent once the requester already has the token
+sequence, but they do not answer "who has KV for this repository
+revision?" from a compact semantic handle alone. EdgeServe's advantage is
+**metadata-first discovery over large remote contexts**, followed by
+exact-token validation for safety.
+
 ---
 
 ## Tiered storage on the context server
@@ -321,6 +347,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | Context-push pipeline (edit → ingest → restore) works | Phase 4.4 end-to-end demo | ✅ RESULTS §4 | §eval.contextpush |
 | **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | ✅ RESULTS §6 (3.67× at 64 repeats, bit-exact token match) | §eval.privacy |
 | **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | ✅ RESULTS §2.3 B1 table (EdgeServe 7× slower than B1 same-host — this is expected and correct) | §eval.baselines |
+| Metadata-first discovery avoids raw-context materialization | Phase 7.4 remote corpus / cold-node lookup | 🔲 TODO §7.4 | §eval.discovery |
 | **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
 | CDN economics improve at 7B / 32k tokens | Phase 8.1–8.2 scale evaluation | 🔲 deferred | §eval.scale |
@@ -372,6 +399,10 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 - **Catalog scale.** Pulsar topic-per-fleet; bloom TTL vs. replay
   cost; leader election for a consolidated view vs. all-to-all
   broadcast. At what fleet size does the gossip cost start to bite?
+- **Semantic aliasing.** Many names can refer to the same bytes
+  (`file:path`, `url`, `repo@commit`, vector-db ID). The catalog should
+  support alias-to-`content_sha` resolution, but KV reuse still requires
+  exact token-prefix validation after alias resolution.
 - **Privacy boundary.** Is entity-name-visibility a concern?
   (Broadcasting `codebase:my-private-repo/secret.py` to all nodes
   even if the KV itself stays on one node.) Hash entity names before
