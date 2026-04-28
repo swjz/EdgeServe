@@ -85,6 +85,18 @@ explicit lists are the correctness gate.  See
 `tests/test_exact_validation.py` for the false-positive-rejection
 stress tests.
 
+**Current correctness caveat.**  The catalog-level gate is implemented,
+but the vLLM connector still has end-to-end hardening work before the
+paper can claim the Bloom-positive risk is fully closed.  Entity-first
+hits must verify that the candidate also covers the consumer's exact
+block-aligned token-prefix hash before loading KV.  Prefix-hash hits
+must preserve the scheduler-selected header UUID, or re-run lookup with
+the same engine provenance on the worker, so a later unqualified
+`resolve()` cannot fetch a wrong-model header with the same token hash.
+Tokenizer/checkpoint provenance is also incomplete when `revision` or
+`tokenizer_hash` is missing, and legacy bloom-only fallback remains an
+unsafe compatibility path.  These items are tracked in `TODO.md` §7.0.
+
 ---
 
 ## Deployment shape
@@ -601,7 +613,8 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | Context-push pipeline (edit → ingest → restore) works | Phase 4.4 end-to-end demo | ✅ RESULTS §4 | §eval.contextpush |
 | **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | ✅ RESULTS §6 (3.67× at 64 repeats, bit-exact token match) | §eval.privacy |
 | **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | ✅ RESULTS §2.3 B1 table (EdgeServe 7× slower than B1 same-host — this is expected and correct) | §eval.baselines |
-| **Correctness: Bloom false positives cannot inject wrong KV** | Phase 7.0 exact validation (header exact-match metadata + catalog post-filter + 17 unit tests) | ✅ tests/test_exact_validation.py | §eval.correctness |
+| **Correctness: Bloom false positives cannot inject wrong KV** | Phase 7.0 exact validation (catalog post-filter done; connector hardening tracked in TODO §7.0) | ⚠️ partial | §eval.correctness |
+| Metadata-first discovery avoids raw-context materialization | Phase 7.4 remote corpus / cold-node lookup | 🔲 TODO §7.4 | §eval.discovery |
 | **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
 | **Primitive generality, case study: embeddings** | Phase E1 Linux v6.12 RAG embedding cache sharing | 🔲 TODO §E1 | §eval.generality |

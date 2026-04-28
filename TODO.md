@@ -447,7 +447,7 @@ see? (Answer: the document text at ingest time; not the query or response.)
 
 These are the comparisons a systems conference reviewer will immediately ask for.
 
-### 7.0 — Exact validation after Bloom-positive lookup ✅ done (2026-04-27)
+### 7.0 — Exact validation after Bloom-positive lookup ⚠️ implemented, hardening pending
 
 `CacheHeader` extended with six exact-match fields:
 - `model_id`, `model_version` (includes dtype disambiguator),
@@ -493,6 +493,33 @@ Live end-to-end:
 
 Existing 42 tests under `tests/test_{vllm_kv_connector,semantic_cache,
 tiered_store}.py` all pass.  Full suite: **59 passed**.
+
+Review findings to fix before the paper claims end-to-end correctness:
+- **Entity-first KV load still needs exact token-prefix validation.** The
+  scheduler can accept a hit from `entity_keys` alone and then pass the block
+  UUID to the worker.  Before loading KV, it must also verify that
+  `hash(current_tokens[:header.num_tokens])` appears in `header.prefix_hashes`.
+  Semantic tags should discover candidates only; exact token-prefix hashes must
+  authorize reuse.
+- **Prefix-hit worker fetch must preserve the validated header.** The scheduler
+  validates model/version/block-size in `_catalog_has()`, but only returns a
+  boolean.  The worker later calls `resolve({request_hash})` without engine
+  provenance, so it can fetch a different header for the same token hash.  Fix
+  by carrying the matched UUID in `_ReqSpec` for prefix hits too, or by adding
+  provenance-aware `resolve()` / `resolve_into()` APIs.
+- **Engine provenance is not yet complete enough.** `_engine_provenance()`
+  records model name, optional revision, dtype, and block size, but
+  `tokenizer_hash` is still `None` and `revision` is often absent for local
+  models.  Add a stable tokenizer/config/checkpoint hash before relying on
+  this for cross-node correctness.
+- **Legacy bloom-only fallback remains unsafe.** Headers without exact metadata
+  still pass through on bloom alone for compatibility.  For paper experiments,
+  either disable legacy headers, mark them non-admissible for KV load, or report
+  them as an unsafe migration mode.
+- **Regression tests needed.** Add tests where two headers share a semantic tag
+  but have different token prefixes, and where two headers share a prefix hash
+  but differ in model provenance.  Both must miss or fetch only the exact
+  scheduler-selected UUID.
 
 ### 7.1 — B1 honest same-host framing ✅ done (2026-04-27)
 
