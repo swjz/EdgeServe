@@ -7,11 +7,12 @@ extends the paper story to token manifests, Linux-scale context packs,
 VLM visual artifacts, and deterministic tool artifacts.
 
 **Status snapshot (2026-04-28):** KV-cache routing, LAN edge inference,
-tiered storage, context push, B1 same-host framing, and multi-turn edge
-decode are complete. Immediate paper-work focus: exact validation after
-Bloom-positive lookup (7.0), metadata-only discovery over a pinned Linux
-context (7.4), VLM visual-artifact discovery (7.5), then LMCache/NIXL
-comparisons (7.2/7.3).
+tiered storage, context push, B1 same-host framing, multi-turn edge
+decode, and the Phase 7.0 exact-validation gate are all complete.
+Immediate paper-work focus, in order: LMCache comparison (7.2),
+then Phase E case studies grounded on Linux v6.12 (E3 compile cache,
+E2 tool-call cache, E1 RAG embeddings), then NIXL (7.3), then
+optional VLM broadening (7.5) and 7B scale (8).
 
 ---
 
@@ -543,51 +544,219 @@ discovery removes per-node configuration; entity tagging for semantic lookup.
 Measure same-host warm hit latency for each connector at 5k and 20k tokens.
 Script: `scripts/bench_nixl_vs_edgeserve.py`.
 
-### 7.4 — Metadata-only discovery over huge remote context 🔲
+### 7.4 — Metadata-only discovery (subsumed by Phase E) 🔲
 
-**Core paper differentiator.** Show that EdgeServe can discover the correct
-prefill node from a compact semantic handle without first downloading,
-tokenizing, or trie-walking the raw context on the edge.
+The original 7.4 scope — show EdgeServe can discover the correct prefill
+node from a compact semantic handle, without first downloading or
+tokenizing the raw context — ships as part of the Phase E case studies
+below rather than as a standalone synthetic bench.  Every Phase E
+experiment measures "bytes fetched before hit decision" on a concrete
+dataset (Linux v6.12), which is the same underlying claim.
 
-Correctness constraint: KV is still reused only when the exact token prefix is
-compatible. Semantic metadata narrows the search to candidate cache blocks;
-exact model/tokenizer/content/prefix validation gates the actual KV load.
+Cold-node join is E1's B1 "centralised vector DB" baseline and E2's
+first-run agent.  Alias resolution falls out of E2 where `file://`,
+`git://`, `url://` handles all resolve to one `content_sha`.
 
-Experiment A — metadata-only lookup:
-- Context server has already prefetched and prefilled a large object
-  (start with a pinned `torvalds/linux` tag/commit, then optionally a
-  100 MB document collection or remote object-store blob).
-- Edge node receives only `{entity, model_id, model_version, content_sha}`
-  plus the user's query, not the raw document bytes.
-- EdgeServe path: Bloom/catalog lookup → exact metadata validation → KV fetch.
-- Prefix-only baseline: edge must fetch raw data or token ids first to construct
-  the prefix-trie/radix/APC lookup key, then either hit or recompute.
-- Metrics: bytes downloaded before hit decision, time-to-hit decision,
-  time-to-first-token, and edge CPU/tokenization cost.
+---
 
-Experiment B — cold-node join:
-- Start a new edge node with empty local cache and no raw documents.
-- Measure time to discover and use an existing prefill block via only the
-  semantic entity header.
-- Compare against LMCache/vLLM/NIXL configurations where the new node needs
-  explicit cache-node configuration, raw-context materialization, or token
-  sequence construction before lookup.
+## Phase E — Case studies beyond KV cache (primitive generality)
 
-Experiment C — alias resolution:
-- Register multiple semantic aliases for the same content hash:
-  `file:<path>`, `repo:<name>@<commit>`, `url:<object>`, `vector_doc:<id>`.
-- Show all aliases resolve to the same validated `content_sha` and therefore
-  the same KV block when tokenization is identical.
-- Negative case: same entity label but different `content_sha` or tokenizer
-  version must miss.
+The Phase 7.0 exact-validation gate + bloom-catalog discovery pattern is
+payload-agnostic.  These case studies exercise the same code paths with
+different entity schemas and serializers, grounding the paper's claim
+that EdgeServe is a general primitive for content-addressable AI
+artifacts.  See DESIGN.md §"Case studies" for the full framing.
 
-Expected result: EdgeServe wins on **lookup bandwidth and cold-node setup**,
-not necessarily on same-host warm-hit latency. This should be one of the main
-paper figures because it isolates the value of semantic indexing from transport
-engineering.
+Each case study ships a `scripts/bench_*.py` and a `RESULTS.md` table
+with: system, hit rate, wall-clock saved, bytes-fetched-before-decision,
+correctness matrix (negative case rejection).
 
-Deliverable: `scripts/bench_metadata_discovery.py` + RESULTS.md table:
-`system`, raw bytes needed before lookup, lookup latency, TTFT, correctness.
+### E1 — Linux v6.12 RAG embedding cache sharing 🔲
+
+**Dataset:** Linux v6.12 tag, filter to `*.c *.h Documentation/**/*.rst
+MAINTAINERS` → ~20 k files, ~1.3 M LOC.  Chunker: semantic chunk per
+top-level function or RST section, 5–30 chunks/file → ~200 k chunks.
+
+**Embedder:** `BAAI/bge-small-en-v1.5` (384-dim bf16, 33 M params).
+Measured throughput:
+- RTX 3080 Ti: ~500 chunks/s → ~7 min full tree
+- Mac M4 MPS:  ~100 chunks/s → ~33 min full tree
+- CPU-only:    ~15  chunks/s → ~4 hours full tree
+
+**Payload:** one `CacheHeader` per file containing a safetensors blob
+of that file's chunk embeddings (stacked).  ~30 KB per header; ~200 k
+chunk tags in the bloom per header; ~300 MB total for the whole tree.
+
+**Entity schema:**
+```
+emb:file:linux@v6.12:<rel-path>#<chunk_idx>
+    model=BAAI/bge-small-en-v1.5
+    version=<sha256(weights)[:16]>
+    content=<sha256(chunk_text)[:16]>
+```
+
+**Baselines:**
+- **B0 — local re-embed:** agent runs the embedder over its working set
+  on fleet join.  Status quo.
+- **B1 — centralised vector DB:** Chroma or LanceDB on the GPU box with
+  explicit per-tenant provisioning.  Fast steady state but a one-time
+  setup tax on cold-node join.
+- **EdgeServe:** Pulsar subscribe + HTTP fetch; no provisioning.
+
+**Fleet experiment:** 1 → 8 agents, each with a 60 % working-set overlap
+(3 of 10 subsystems randomly chosen).  Each agent runs one retrieval
+pass (~1 k queries) over its working set.  Measure:
+- total embedding compute minutes fleet-wide
+- per-agent TTFT on the first retrieval call
+- bytes fetched before hit decision (header ~1 KB vs raw file ~30 KB)
+
+**Expected shape:** B0 grows linearly (`N × 7 min` GPU, `N × 33 min`
+Mac); EdgeServe plateaus at `7 min + N × fetch_time`; B1 tracks
+EdgeServe once provisioned.
+
+**Correctness demo:** bump to v6.13.  Files with a one-byte change
+get a new `content_sha`; the exact-validation gate rejects v6.12
+embeddings for those.  Retrieval correctness before/after: bit-exact
+top-K match on unchanged files; stale rejection on changed files.
+
+**Deliverables:**
+- `scripts/bench_embedding_cache.py` (seed + query + fleet subcommands)
+- `edgeserve/artifacts/embedding.py` — entity-schema helper +
+  safetensors chunk-stack serializer
+- RESULTS.md §E1 with fleet-size figure + correctness table
+
+### E2 — Linux v6.12 tool-call result cache 🔲
+
+**Dataset:** Linux v6.12 worktree; commands over the kernel tree.
+
+**Concrete commands (measured per-run cost on the GPU box):**
+
+| command | cost | fleet hit probability |
+|---|---|---|
+| `git grep -n "struct sk_buff"` @ v6.12 | 0.8 s | ~90 % |
+| `scripts/checkpatch.pl patches/fix.diff` | 2–10 s | ~0 % (per-patch) |
+| `make defconfig` | 25 s | ~100 % on fresh worktree |
+| `make -j$(nproc) drivers/net/ethernet/intel/e1000/` | 3 min cold / 8 s warm | ~30 % subsystem overlap |
+| `scripts/get_maintainer.pl -f <path>` | 0.3 s | ~70 % |
+| `cppcheck --enable=all drivers/net/` | 2 min | ~30 % |
+
+**Entity schema:**
+```
+tool:<cmd_name>:<args_sha>:<tree_sha>@repo=linux@tag=v6.12
+```
+`tree_sha` is `git rev-parse` for read-only commands, or
+`git hash-object`-fold over read paths for build commands, or
+`sha256(patch)` for checkpatch-style tools.  Aliases:
+- `file://linux/drivers/net/e1000/e1000_main.c@sha=X`
+- `git://torvalds/linux@v6.12:drivers/net/e1000/e1000_main.c`
+- `url://raw.githubusercontent.com/torvalds/linux/v6.12/…`
+All three hash to the same `content_sha` via an alias resolver and map
+to one cache entry.
+
+**Payload:** `(stdout, stderr, exit_code, artifacts_tarball)`
+msgpack-packed.  KB for grep/get_maintainer; MB for build output
+(compiled `.o` tree).
+
+**Baselines:**
+- **B0:** every agent runs every command locally.
+- **B1:** `ccache`/`sccache` (build-only, local, no cross-host sharing).
+- **EdgeServe:** first-agent publishes, fleet reuses.
+
+**Fleet experiment:** 8 agents × 2 subsystems each × 10 min workload
+drawn from the command table.  Subsystems chosen with 60 % overlap.
+Metrics:
+- fleet wall-clock (each agent's total time to complete its script)
+- per-command hit rate
+- fleet-wide compute minutes saved
+- bytes fetched before hit decision
+
+**Correctness demo (the sharper one):**
+- Agent A: clean v6.12 worktree, runs
+  `make drivers/net/ethernet/intel/e1000/` → publishes with
+  `tree_sha=<A's sha>`.
+- Agent B: edits `e1000_main.c` → `tree_sha` changes by one byte.
+- B's query: exact-validation rejects A's entry.
+- **Without exact-validation, B would use A's stale build and
+  wrongly conclude its edit compiles.**  This consequence is more
+  visible than KV-cache FP-positives; include in the paper as the
+  correctness demo.
+
+Also include a tight-bloom FPR stress: 500 unseen tag probes → 0 false
+admits (mirrors `test_exact_validation.test_tight_bloom_stress`).
+
+**Deliverables:**
+- `scripts/bench_tool_cache.py`
+- `edgeserve/artifacts/tool_result.py` — entity-schema helper + result
+  serializer; `tree_sha` computation helper
+- `edgeserve/artifacts/aliases.py` — name-to-`content_sha` resolver for
+  `file://`, `git://`, `url://` handles
+- RESULTS.md §E2 with fleet-wall-clock figure + hit-rate-by-command
+  table + correctness matrix
+
+### E3 — vLLM compile-cache / CUDA-graph sharing 🔲
+
+**Observation:** every vLLM cold start pays ~8.6 s on torch.compile +
+CUDA graph capture.  We've seen this in every probe log, e.g.
+`INFO core.py:283 init engine took 8.59 seconds`.  vLLM already writes
+deterministic artifacts to `~/.cache/vllm/torch_compile_cache/<hash>/`
+(10–50 MB per config).
+
+**Entity schema:**
+```
+vllm-compile:model=Qwen/Qwen2.5-1.5B
+    dtype=bfloat16
+    torch=2.10.0+cu128
+    vllm=0.19.1
+    gpu_arch=sm86
+    block_size=16
+    cache_config_sha=<sha256 of CompilationConfig>
+```
+
+**Payload:** `tar.zst` of the cache directory.  ~10–50 MB.
+
+**Baselines:**
+- **B0 — always cold:** 8.6 s every start, every machine, every
+  restart.
+- **B1 — local disk cache:** 8.6 s first start, ~2 s warm on same
+  machine; new machines re-pay 8.6 s.
+- **EdgeServe:** 8.6 s on first fleet member, ~1 s for every
+  subsequent machine (~250 ms gigabit fetch + unpack).
+
+**Experiment:** one-time warmup on machine A; measure cold-start time
+on machines B, C, D with the shared cache vs without.  Plot init
+time × fleet size.
+
+**Correctness demo:** stage a heterogeneous fleet with at least one
+different GPU arch or torch version (simulate by stamping
+`gpu_arch=sm89` in the consumer's provenance).  Exact-validation must
+reject.
+
+**Deliverables:**
+- `scripts/bench_vllm_compile_cache.py`
+- `edgeserve/artifacts/vllm_compile.py` — entity-schema helper +
+  tar.zst serializer
+- RESULTS.md §E3 with cold-start-vs-fleet-size figure + heterogeneous
+  fleet correctness table
+
+### Execution sequencing
+
+- **E3 first.**  Smallest payload, cleanest correctness gate, fastest
+  to land — a sanity check that the primitive is really
+  payload-agnostic before investing in the bigger case studies.
+- **E2 next.**  Linux tool-call cache.  The correctness story is the
+  paper's sharpest correctness demo (stale-tree false positive has
+  visible consequences).  Also lands the alias-resolution helper,
+  which E1 can optionally reuse.
+- **E1 last.**  Largest experiment — fleet of 8, full Linux tree, full
+  embedding pass.  Produces the paper's headline "primitive generalises
+  to RAG" figure.
+
+All three case studies should reuse the existing `SemanticCacheClient`
+catalog unchanged.  Only the entity-tag helper and the payload
+serializer are new code; the bloom, catalog, exact-validation gate,
+and HTTP transport are shared.
+
+---
 
 ### 7.5 — VLM visual-artifact discovery 🔲
 

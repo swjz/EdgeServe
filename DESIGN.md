@@ -2,22 +2,31 @@
 
 *EdgeServe-v2.* A natural extension of EdgeServe (Shaowang & Krishnan,
 [arxiv 2303.08028](https://arxiv.org/pdf/2303.08028.pdf)) from routing
-streaming feature data and model outputs across edge nodes to routing
-**validated inference artifacts** across edge nodes for large language
-and vision-language model serving. KV-cache blocks are the flagship
-artifact and the current implementation focus; the same discovery plane
-also applies to token/block manifests, multimodal encoder outputs,
-context packs, deterministic tool artifacts, and eventually static
-visual state in VLA control loops.
+streaming feature data and model outputs across edge nodes to a
+fleet-scale discovery substrate for **validated inference artifacts**
+at the edge.  KV-cache blocks are the flagship artifact and the current
+implementation focus; the same discovery plane applies to RAG
+embeddings, token/block manifests, multimodal encoder outputs, context
+packs, deterministic tool-call results, engine compile caches, and
+eventually static visual state in VLA control loops.
 
 ---
 
 ## Thesis
 
 **Live decode and control want to live at the edge; expensive context
-processing wants to live next to the data. Validated inference artifacts
+processing wants to live next to the data.  Validated inference artifacts
 are the transfer assets that bridge them, discovered probabilistically
 by semantic entity and reused only after exact compatibility checks.**
+
+Restated as a primitive: **semantic entity tags + probabilistic fleet
+discovery + exact-validation gate.**  KV cache is the load-bearing case
+study; embeddings, tool-call results, engine compile caches, and
+multimodal visual artifacts exercise the same primitive with different
+payloads.  The bloom-filter catalog + exact-match header metadata +
+engine-provenance gate are payload-agnostic; §"Case studies" enumerates
+three non-KV applications where the same code paths apply with a
+different entity schema.
 
 Small-to-medium LLMs/VLMs running on local hardware (M-series Macs,
 prosumer GPUs, eventually phones and robots) are viable for interactive
@@ -278,6 +287,148 @@ edit, not per token; this doesn't saturate the upstream link.
 
 ---
 
+## Case studies — one primitive, four payloads
+
+The catalog + bloom + exact-validation gate is payload-agnostic.  Below
+are four workloads that exercise the same code paths with different
+entity-tag schemas and serializers.  KV cache is the focal study
+(Phases 2–6, 7.0–7.3); the other three establish the primitive's
+generality and land as separate paper figures.
+
+### Case study A — KV cache sharing (primary, Linux dataset)
+
+Already measured in Phases 2–6.  Future scale-up (Phase 8) targets
+Linux v6.12 as a realistic long-context document: kernel maintainers
+pin a version, repeatedly embed/prefill the same subtrees, and
+overlap heavily across subsystems.
+
+### Case study B — RAG embedding cache sharing  (Phase E1, planned)
+
+**Workload:** a fleet of kernel-developer agents running RAG over
+Linux v6.12 (~1.3 M LOC across ~80 k files).  Each agent has a
+working set of a few subsystems and would otherwise re-embed them
+locally every time.  With EdgeServe, the first agent embeds and
+publishes; the fleet reuses.
+
+**Entity schema:**
+```
+emb:file:linux@v6.12:<path>#<chunk_idx>
+    model=BAAI/bge-small-en-v1.5
+    version=sha256(model_weights)[:16]
+    content=sha256(chunk_text)[:16]
+```
+
+Published one `CacheHeader` per file with a safetensors blob of that
+file's chunk embeddings.  Bloom holds all chunk-level tags so an
+agent can query `emb:file:linux@v6.12:drivers/net/e1000/e1000_main.c#7`
+and hit.  Exact-validation rejects v6.12→v6.13 sha changes.
+
+**Payload sizes:** 300 MB for the whole tree (20 k files × ~30 KB
+of embeddings each); 1.5 KB per chunk (BGE-small is 384-dim bf16).
+
+**Baselines:** (a) B0: agents re-embed locally every time; (b) B1:
+centralized vector DB (Chroma / LanceDB) with explicit per-tenant
+provisioning.
+
+**Headline figure:** total embedding compute across the fleet as
+fleet size grows from 1 → 8 agents with 60 % working-set overlap.
+B0 grows linearly (`N × 7 min` on GPU or `N × 33 min` on Mac);
+EdgeServe plateaus at `7 min + N × fetch_time`; B1 tracks EdgeServe
+once provisioned but pays a one-time setup tax on cold-node join.
+
+### Case study C — Tool-call result cache (Phase E2, planned)
+
+**Workload:** N kernel-developer agents running deterministic
+commands over Linux v6.12 in overlapping subsystems.  Concrete
+commands with measured per-run cost:
+
+| command | cost | fleet commonality |
+|---|---|---|
+| `git grep -n "struct sk_buff" @ v6.12` | 0.8 s | very high |
+| `scripts/checkpatch.pl patches/fix.diff` | 2–10 s | per-patch |
+| `make defconfig` | 25 s | every fresh worktree |
+| `make -j$(nproc) drivers/net/ethernet/intel/e1000/` | 3 min cold / 8 s warm | subsystem agents |
+| `scripts/get_maintainer.pl -f <path>` | 0.3 s | PR prep |
+| `cppcheck --enable=all drivers/net/` | 2 min | static analysis |
+
+**Entity schema:**
+```
+tool:<cmd>:<args_sha>:<tree_sha>@repo=linux@tag=v6.12
+```
+where `tree_sha` is the git hash of the file/directory the command
+reads.  Aliases arise naturally: `file://…@sha=X`,
+`git://torvalds/linux@v6.12:…`, `url://raw.githubusercontent.com/…`
+all resolve to the same `content_sha` via catalog lookup, one cache
+entry covers three access patterns.
+
+**Correctness demo (sharper than KV-cache):** Agent A publishes the
+build result of `drivers/net/ethernet/intel/e1000/`.  Agent B edits
+`e1000_main.c` → `tree_sha` differs by one byte.  The exact-validation
+gate rejects A's result; without it, B would silently use A's stale
+build and wrongly conclude its change compiles.  Consequences of a
+silent false positive are visible here in a way they aren't for KV.
+
+**Baselines:** B0 each agent runs every command locally; B1
+`ccache`/`sccache` (local, no cross-host sharing); EdgeServe
+cross-host.
+
+**Headline figure:** fleet of 8 agents working on 2 of 10 overlapping
+subsystems for 10 minutes each.  Wall-clock per agent and
+fleet-wide compute minutes saved.
+
+### Case study D — vLLM compile-cache / CUDA-graph sharing (Phase E3, planned)
+
+**Workload:** every vLLM cold start pays ~8.6 s on `torch.compile`
++ CUDA graph capture (measured repeatedly in our logs, e.g. `INFO
+core.py:283 init engine took 8.59 seconds`).  A fleet of identical
+RTX 3080 Ti workstations all pay this tax independently.  vLLM
+already writes deterministic compile artifacts to
+`~/.cache/vllm/torch_compile_cache/<hash>/`.
+
+**Entity schema:**
+```
+vllm-compile:model=Qwen/Qwen2.5-1.5B
+    dtype=bfloat16
+    torch=2.10.0+cu128
+    vllm=0.19.1
+    gpu_arch=sm86
+    block_size=16
+    cache_config_sha=<hash of CompilationConfig>
+```
+
+**Payload:** tarball of the compile-cache directory.  ~10–50 MB.
+
+**Baselines:** B0 always cold (8.6 s every start); B1 local disk
+cache (8.6 s first start, ~2 s warm on same machine only);
+EdgeServe (8.6 s on first fleet member, ~1 s on every subsequent
+fleet member).
+
+**Correctness demo:** heterogeneous fleet of 3 × RTX 3080 Ti (sm86)
+plus 1 × RTX 4090 (sm89).  The 4090 must miss the sm86 compile
+cache — exact-validation rejects on `gpu_arch`.
+
+### Why these three
+
+- Three different **payload sizes**: embeddings 30 KB/file,
+  tool-results KB–MB, compile-cache 10–50 MB tarball.  Demonstrates
+  transport is payload-agnostic.
+- Three different **correctness gate mechanics**:
+  content+model version (E1), content+tree+args (E2), engine ABI +
+  arch (E3).  Each exercises `CacheHeader.matches_engine()` plus
+  `covers_prefix_hash` / `covers_entities` with different
+  dimensions populated.
+- Three different **hit-rate regimes**: high (tool-grep ~90 %),
+  medium (embeddings at realistic fleet overlap ~60 %), low
+  (tool-build ~30 %) plus the always-miss-on-mismatch negative
+  cases.  Together they stress the catalog + bloom FPR behaviour
+  honestly.
+
+These are case-studies for the paper, not re-engineering of the
+connector.  Each one adds a small `scripts/bench_*.py` and a
+payload-specific entity-schema helper, nothing more.
+
+---
+
 ## What's built (as of 2026-04-23)
 
 | component | file | status |
@@ -451,21 +602,26 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | ✅ RESULTS §6 (3.67× at 64 repeats, bit-exact token match) | §eval.privacy |
 | **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | ✅ RESULTS §2.3 B1 table (EdgeServe 7× slower than B1 same-host — this is expected and correct) | §eval.baselines |
 | **Correctness: Bloom false positives cannot inject wrong KV** | Phase 7.0 exact validation (header exact-match metadata + catalog post-filter + 17 unit tests) | ✅ tests/test_exact_validation.py | §eval.correctness |
-| Metadata-first discovery avoids raw-context materialization | Phase 7.4 remote corpus / cold-node lookup | 🔲 TODO §7.4 | §eval.discovery |
-| Semantic discovery extends to VLM visual artifacts | Phase 7.5 VLM asset-cache discovery | 🔲 TODO §7.5 | §eval.multimodal |
 | **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
+| **Primitive generality, case study: embeddings** | Phase E1 Linux v6.12 RAG embedding cache sharing | 🔲 TODO §E1 | §eval.generality |
+| **Primitive generality, case study: tool-call results** | Phase E2 Linux v6.12 dev-tool result cache | 🔲 TODO §E2 | §eval.generality |
+| **Primitive generality, case study: compile artifacts** | Phase E3 vLLM compile-cache / CUDA-graph sharing | 🔲 TODO §E3 | §eval.generality |
+| Semantic discovery extends to VLM visual artifacts | Phase 7.5 VLM asset-cache discovery (optional, broader framing) | 🔲 TODO §7.5 | §eval.multimodal |
 | CDN economics improve at 7B / 32k tokens | Phase 8.1–8.2 scale evaluation | 🔲 deferred | §eval.scale |
 
 **Priority order for next work sessions:**
 
 1. ~~Phase 6 (end-to-end Mac demo)~~ ✅ **done 2026-04-24**.
 2. ~~Phase 7.1 (B1 framing)~~ ✅ **done 2026-04-27**.
-3. Phase 7.4 (metadata-only Linux/repo discovery) — best broader-paper figure.
-4. Phase 7.5 (VLM visual artifact discovery) — broadens beyond text KV.
-5. Phase 7.2 (LMCache) — required for any systems venue submission.
-6. Phase 7.3 (NIXL) — secondary; useful if we target a vLLM-aware audience.
-7. Phase 8 (scale) — deferred until better GPU hardware is available.
+3. ~~Phase 7.0 (correctness gate)~~ ✅ **done 2026-04-27**.
+4. **Phase 7.2 (LMCache)** — the KV case-study comparison; reviewer-expected.
+5. **Phase E3 (vLLM compile-cache)** — smallest non-KV case study; proves portability quickly.
+6. **Phase E2 (Linux tool-call cache)** — the sharper correctness story (stale-tree false positive); also the natural home for Linux-scale metadata-only discovery (subsumes old Phase 7.4).
+7. **Phase E1 (Linux embedding cache)** — the fleet-scaling headline figure.
+8. Phase 7.3 (NIXL) — secondary KV comparison.
+9. Phase 7.5 (VLM visual artifact discovery) — optional broader framing; only if time permits.
+10. Phase 8 (7B / 32k scale) — deferred until better GPU hardware is available.
 
 ---
 
