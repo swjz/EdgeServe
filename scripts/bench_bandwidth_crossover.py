@@ -125,7 +125,7 @@ if __name__ == '__main__':
     prefill_ms = (time.perf_counter() - t0) * 1000
     tok_id = out[0].outputs[0].token_ids[0]
     print(f'[seeder] prefill={{prefill_ms:.1f}}ms  token={{tok_id}}  doc_repeats={args.doc_repeats}', flush=True)
-    print(f'[seeder] topic={repr(topic)}', flush=True)
+    print('[seeder] topic=' + {repr(topic)}, flush=True)
     # Read back block_uuid + node_uri
     import pulsar as _pulsar, uuid as _uuid, msgpack as _mp
     _pc = _pulsar.Client({repr(args.pulsar_url)})

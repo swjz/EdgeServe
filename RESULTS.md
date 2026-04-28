@@ -286,10 +286,12 @@ Both landed.
 
 - **Cross-host speedup.** All workers here share one GPU + localhost.
   LAN results (Mac Mini ↔ 3080 Ti) are in the "Phase 2: LAN CDN
-  transport" section: 179 Mbps sustained, 10.5s for a 234.9 MB blob,
-  ~8× slower than recompute on a home LAN. Crossover benchmark (Phase
-  2.2) shows the threshold is **~1.2–1.6 Gbps** (10 GbE or faster),
-  or **11 Mbps** for a CPU-only consumer at 50 tok/s prefill.
+  transport" section.  Updated 2026-04-27 with wired measurements:
+  935 Mbps sustained, 2.0 s for a 234.9 MB blob, **1.47× slower than
+  GPU recompute** at 256 doc-repeats (down from ~6× over Wi-Fi).
+  Crossover benchmark (Phase 2.2) shows the GPU-edge threshold is
+  **~1.5 Gbps** (gigabit gets close; any faster NIC wins), or
+  **11 Mbps** for a CPU-only consumer at 50 tok/s prefill.
 
 - **EdgeServe routing on top of vLLM.** The Phase-3 numbers above use
   `HFEngine`; the raw per-agent prefill is much slower than vLLM. A
@@ -628,67 +630,67 @@ server (Python `http.server`, `Content-Length` streaming, port 37423).
 Consumer used `http_fetch()` from `edgeserve.semantic_cache.http_client` — a
 plain `urllib.request.urlopen` call.
 
-**Update 2026-04-24:** With the Mac wired to the router over Ethernet
-(instead of Wi-Fi), throughput jumps to **935–940 Mbps sustained** — the
-full gigabit link, **5.2× the Wi-Fi baseline**.  At 256 doc-repeats the
-645.9 MB blob transfers in 5.5 s instead of 11 s.  See "Phase 6" below
-for the updated measurements.  The home-LAN figures in this section
-reflect the original Wi-Fi measurement, kept for comparison.
+### HTTP fetch results — wired gigabit LAN (UPDATED 2026-04-27)
 
-### HTTP fetch results (blob = 234.9 MB, 8448-token KV)
+Mac Mini directly plugged into the router's gigabit Ethernet port; GPU
+box connects to the same switch.  Full sweep across blob sizes using
+`scripts/bench_bandwidth_crossover.py` in seed/consume mode (GPU box
+seeds via vLLM + EdgeServeKVConnector; Mac runs `--block-uuid` +
+`--node-uri` direct fetch to bypass DNS issues with `swjz-ubuntu`).
+
+| doc-repeats | ~tokens | blob MB | GPU prefill (ms) | LAN fetch median (ms) | throughput (Mbps) | fetch / prefill |
+|------------:|--------:|--------:|-----------------:|----------------------:|------------------:|----------------:|
+|   16 |   ~544 |  15.1 |    98.4 |   133.4 |  908 | 1.36× |
+|   32 | ~1 089 |  30.3 |   164.0 |   262.0 |  924 | 1.60× |
+|   64 | ~2 178 |  60.6 |   301.9 |   519.6 |  932 | 1.72× |
+|  128 | ~4 356 | 121.1 |   620.5 | 1 033.8 |  937 | 1.67× |
+|  256 | ~8 448 | 234.9 | 1 371.8 | 2 017.3 |  931 | 1.47× |
+
+Throughput is essentially flat at **~910–940 Mbps** across blob sizes —
+within a few percent of gigabit line rate.  The fetch-to-prefill ratio
+hovers around **1.5–1.7×**, meaning on this GPU-edge hardware the LAN
+fetch is still slower than GPU recompute, but only by a small constant
+factor (not the 6× seen over Wi-Fi).
+
+### Wi-Fi baseline (original 2026-04-22, kept for comparison)
+
+Same setup but Mac on 5 GHz Wi-Fi:
 
 | fetch | time (ms) | throughput |
 |------:|----------:|-----------:|
 | 1     | 10 525    | 179 Mbps   |
-| 2     | 10 438    | 180 Mbps   |
-| 3     | 10 316    | 182 Mbps   |
-| 4     | 10 253    | 183 Mbps   |
-| 5     | 11 105    | 169 Mbps   |
-| 6     | 11 222    | 167 Mbps   |
-| 7     | 11 421    | 165 Mbps   |
-| **median** | **10 526** | **179 Mbps** |
+| median of 7 | **10 526** | **179 Mbps** |
 
-Blob size: 234.9 MB = 8448 tokens × Qwen2.5-1.5B bf16 KV cache.
+At 256 repeats / 234.9 MB blob: Wi-Fi fetch 10.5 s vs wired fetch 2.0 s
+= **5.2× improvement** just from moving to Ethernet.
 
-### Crossover analysis
+### Crossover analysis (updated)
 
-Seeder prefill (GPU box, 1780 ms for 8448 tokens) vs consumer HTTP fetch
-(10 526 ms). **Fetch is 5.9× slower than recompute on this home LAN.**
+From the wired sweep, the equivalent-prefill rate over LAN is:
+  935 Mbps ÷ 27.8 KB/token ≈ **4 200 tokens/s**
 
-| metric | value |
-|--------|-------|
-| LAN sustained throughput | 179 Mbps (≈ 22.5 MB/s) |
-| KV density | ≈ 27.8 KB/token (1.5B model, bf16) |
-| GPU prefill rate | ≈ 4 740 tokens/s (3080 Ti) |
-| Equivalent network prefill rate | ≈ 810 tokens/s |
-| **Fetch vs recompute ratio** | **5.9× slower** |
+The 3080 Ti prefill rate for Qwen2.5-1.5B across the same sweep:
+  8 448 tokens ÷ 1.37 s ≈ **6 165 tokens/s**
 
-The ratio is constant across context lengths because both fetch and recompute
-scale linearly with token count for this model (MLP dominates compute; KV size
-scales linearly). The crossover therefore does NOT exist on this home LAN for a
-3080 Ti — fetch is always ~6× slower.
+So LAN/GPU = 4 200 / 6 165 ≈ **0.68** — LAN fetch lands at ~68% of GPU
+speed.  The crossover on the GPU edge is *not quite reached* on gigabit
+Ethernet, but it is close.  A 1.5 Gbps link, or any NIC faster than
+gigabit, flips the ratio to fetch-wins for this model+GPU combination.
 
-### When does fetch beat recompute?
-
-The crossover requires the network to be faster than the GPU's prefill in
-tokens/second-equivalent terms:
-- For fetch to win: network_throughput / kv_density > gpu_prefill_rate
-- i.e.: network_throughput > 4 740 tokens/s × 27.8 KB/token = 132 MB/s = **1.05 Gbps**
-
-A 10 GbE link saturated at 1.2 GB/s would give equivalent prefill of ~43 000 tokens/s
-— ~9× faster than the GPU. Or, on a CPU-only edge device prefilling at ~50 tokens/s,
-the 179 Mbps LAN is already **14× faster** than recompute. The CDN economics shift
-dramatically by deployment context.
+For a **Mac-edge (M4 MPS) consumer**, the crossover is crossed by a
+wide margin at nearly every context size — see §Phase 2.2c below (wired
+LAN beats Mac prefill by >3× at 64+ repeats, >14× at 256 repeats since
+MPS attention goes quadratic).
 
 ### Notes
 
-- The Python `http.server` backend likely caps throughput; the actual LAN link
-  (measured by iperf3) would be higher. A production server (nginx, asyncio,
-  sendfile) would reduce fetch time substantially.
-- Pulsar catalog discovery was confirmed working via local test (GPU box):
-  `catalog.lookup(hash)` returns the header within 3s. The Mac Mini consumer
-  had a stale subscription cursor issue (Pulsar durable subscriptions remember
-  the cursor across reconnects); the direct-fetch path was used for these numbers.
+- The Python `http.server` backend achieves gigabit line rate on this
+  workload — we originally speculated it might cap throughput, but the
+  wired measurements show it doesn't.
+- Pulsar catalog discovery: still the stale-cursor issue (default
+  retention = 0 min) requires re-subscribing with a fresh name, or
+  using the direct-fetch path (`--block-uuid` + `--node-uri`) which the
+  sweep driver uses.
 
 ## Phase 2.2c — B0 Mac Mini (Apple M4, MPS) prefill baseline
 
@@ -726,12 +728,24 @@ crossover_bw = blob_MB × 8 / mac_prefill_s
 **Key finding:** On a Mac Mini (Apple M4), any link faster than ~125–195 Mbps
 beats local MPS prefill at short contexts; at 256 repeats even a 35 Mbps link wins.
 
-Our home LAN (179 Mbps) is **above the crossover for 128+ repeat contexts**:
-- 128 doc-repeats: LAN fetch ~5.4s vs Mac prefill 7.7s → **fetch wins by 1.43×**
-- 256 doc-repeats: LAN fetch ~10.5s vs Mac prefill 53.9s → **fetch wins by 5.1×**
+Our **wired gigabit LAN (~935 Mbps, measured 2026-04-27)** is far above the
+crossover at every context size — fetch wins decisively for the Mac edge:
+
+| doc-repeats | wired LAN fetch | Mac MPS prefill | fetch / prefill | fetch wins by |
+|------------:|----------------:|----------------:|----------------:|:-------------:|
+|  16  |   133 ms |    623 ms | 0.21 |  4.7× |
+|  32  |   262 ms |  1 291 ms | 0.20 |  4.9× |
+|  64  |   520 ms |  2 985 ms | 0.17 |  5.7× |
+| 128  | 1 034 ms |  7 734 ms | 0.13 |  7.5× |
+| 256  | 2 017 ms | 53 921 ms | 0.04 | **26.7×** |
+
+(Original Wi-Fi numbers at 179 Mbps: fetch wins at 128+ repeats only —
+1.43× at 128, 5.1× at 256.)
 
 This inverts the GPU story: EdgeServe's CDN model is compelling for edge devices
-with weaker compute (Mac Mini, laptop CPU, Raspberry Pi) even on standard GigE/Wi-Fi.
+with weaker compute (Mac Mini, laptop CPU, Raspberry Pi).  On wired gigabit it
+is a near-universal win; on Wi-Fi it still wins at long context where MPS
+quadratic attention dominates.
 
 ## Phase 2.2 — bandwidth-vs-recompute crossover sweep (same-host mmap)
 
@@ -774,20 +788,23 @@ This is a constant independent of context length (for this model+GPU):
 **Crossover is consistently 1.2–1.6 Gbps** for Qwen2.5-1.5B on a 3080 Ti,
 regardless of context length. This confirms:
 
-- Our **home LAN at 179 Mbps is 7–8× below the crossover** — fetch loses at every size.
-- A **10 GbE link at ≥1.4 Gbps sustained** would make fetch faster than recompute.
+- Our **wired gigabit LAN at ~935 Mbps is 1.5–1.7× below the GPU-edge crossover** —
+  fetch loses by a small constant factor on GPU edge, but only barely.
+- Our original **Wi-Fi LAN at 179 Mbps is 7–8× below the crossover** — fetch lost decisively.
+- A link faster than gigabit (≥1.5 Gbps actual) would make fetch beat recompute on GPU edge.
 - On a **CPU-only edge device** (≈50 tok/s prefill): crossover drops to
   27.8 KB/tok × 50 tok/s = 1.39 MB/s = **11 Mbps** — any 100 Mbps LAN wins.
 
-### Combined picture
+### Combined picture (updated 2026-04-27 with wired measurements)
 
-| scenario | link | fetch vs recompute | verdict |
+| scenario | link (measured) | fetch vs recompute | verdict |
 |---|---|---|---|
-| Same-host mmap (measured) | ~8 Gbps | 5–14× **faster** | always wins |
-| 10 GbE LAN (≥3 Gbps actual) | 3 000+ Mbps | ~1× (break-even) | wins at ≥3 Gbps |
-| Gigabit Ethernet (179 Mbps actual) | 179 Mbps | **~7–8× slower** | loses on GPU edge |
-| **Mac Mini M4 + 179 Mbps LAN** | 179 Mbps | **1.4–5.1× faster** (128–256 repeats) | **wins — crossover ~125–195 Mbps** |
-| CPU edge (50 tok/s) + 179 Mbps | 179 Mbps | **~15× faster** | always wins |
+| Same-host mmap | ~8 Gbps | 5–14× **faster** | always wins |
+| **Wired gigabit LAN (measured)** | **935 Mbps** | **1.47–1.72× slower** on GPU edge | loses by small margin |
+| **Wired gigabit + Mac M4 edge** | 935 Mbps | **3.67× faster at 64 rep; >14× at 256 rep** | **wins broadly** |
+| Wi-Fi 5 GHz (measured, 2026-04-22) | 179 Mbps | ~7–8× slower on GPU edge | loses on GPU edge |
+| Wi-Fi + Mac M4 edge | 179 Mbps | 1.4–5.1× faster at 128–256 rep | wins at long context |
+| CPU edge (50 tok/s) + gigabit | 935 Mbps | **≈30× faster** | always wins |
 | CPU edge + 11 Mbps | 11 Mbps | ~1× (break-even) | wins above 11 Mbps |
 
 ## Phase 2.2b — Throttled HTTP fetch vs GPU prefill (empirical crossover)
