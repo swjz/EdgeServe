@@ -413,7 +413,18 @@ Measure end-to-end from "user hits enter" to "first token generated":
 
 Script: `scripts/demo_edge_inference.py`. Run seeder on GPU box, consumer CLI on Mac.
 
-### 6.2 — Multi-turn conversation 🔲
+### 6.2 — Multi-turn conversation ✅ done (2026-04-27)
+
+`scripts/bench_multiturn.py`.  Same-host run on GPU box (isolates
+per-turn story from network cost).  Qwen2.5-1.5B.
+
+Results: at 128 repeats (11 264 doc tokens) / 4 turns, per-turn
+speedup is 2.13–2.39×; cumulative 1.99×.  At 64 repeats / 3 turns,
+per-turn 1.56–1.62×, cumulative 1.38×.  Speedup grows with context
+length because B0 re-prefills the entire doc every turn while
+EdgeServe prefills only the 14–149-token conversation delta.
+
+See RESULTS.md §Phase 6.2.
 
 After Q1+A1, the conversation prefix grows. Measure second-query latency when the
 new delta (Q1+A1, a few hundred tokens) is the only cold portion.
@@ -434,7 +445,18 @@ see? (Answer: the document text at ingest time; not the query or response.)
 
 These are the comparisons a systems conference reviewer will immediately ask for.
 
-### 7.1 — B1 honest same-host framing 🔲
+### 7.1 — B1 honest same-host framing ✅ done (2026-04-27)
+
+`scripts/bench_b1_vllm_apc.py`.  Single vLLM with APC, same workload
+as Phase 2.3 (4 agents, 6 272-token prefix).
+
+  - B1 warm sequential:  24 ms/agent  (7× faster than EdgeServe 176 ms)
+  - B1 warm batched:     15 ms/agent amortised  (12× faster)
+  - B1 cold first:      237 ms  (comparable to B2)
+
+Conclusion recorded in RESULTS §Phase 2.3: EdgeServe does NOT beat B1
+on same host.  EdgeServe's niche is cross-host, process-restart, and
+edge devices that can't run vLLM.  Frame the paper around those three.
 
 B1 = single vLLM instance, `enable_prefix_caching=True`, serving all N agents
 via one `llm.generate(prompts=[...])` call (continuous batching).

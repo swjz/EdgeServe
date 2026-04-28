@@ -320,7 +320,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | NVMe persistence survives GPU eviction, speedup on restore | Phase 3.6 tool eviction | ✅ RESULTS §3.6 | §eval.eviction |
 | Context-push pipeline (edit → ingest → restore) works | Phase 4.4 end-to-end demo | ✅ RESULTS §4 | §eval.contextpush |
 | **Decode stays at the edge; prompt never leaves** | Phase 6.1 Mac edge inference | ✅ RESULTS §6 (3.67× at 64 repeats, bit-exact token match) | §eval.privacy |
-| **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | 🔲 TODO §7.1 | §eval.baselines |
+| **EdgeServe's niche: cross-host, not same-host vs APC** | Phase 7.1 B1 framing | ✅ RESULTS §2.3 B1 table (EdgeServe 7× slower than B1 same-host — this is expected and correct) | §eval.baselines |
 | **Differentiator over LMCache: zero-config discovery** | Phase 7.2 LMCache comparison | 🔲 TODO §7.2 | §eval.related |
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
 | CDN economics improve at 7B / 32k tokens | Phase 8.1–8.2 scale evaluation | 🔲 deferred | §eval.scale |
@@ -328,8 +328,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 **Priority order for next work sessions:**
 
 1. ~~Phase 6 (end-to-end Mac demo)~~ ✅ **done 2026-04-24**.
-2. Phase 7.1 (B1 framing) — one extra row in the existing results table;
-   directly addresses the "why not just use vLLM APC" reviewer question.
+2. ~~Phase 7.1 (B1 framing)~~ ✅ **done 2026-04-27**.
 3. Phase 7.2 (LMCache) — required for any systems venue submission.
 4. Phase 7.3 (NIXL) — secondary; useful if we target a vLLM-aware audience.
 5. Phase 8 (scale) — deferred until better GPU hardware is available.
