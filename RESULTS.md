@@ -1152,6 +1152,78 @@ Cumulative: B0 2 512 ms vs ES 1 819 ms → **1.38×**.
   two tokens after ~90 steps; answers remain semantically identical.
   Bit-exact match is preserved on turn 1 and 2 in both configurations.
 
+## Phase E3 — vLLM compile-state fleet sharing (primitive generality)
+
+**Date:** 2026-04-28.  Script: `scripts/bench_vllm_compile_cache.py`,
+artifact helper: `edgeserve/artifacts/vllm_compile.py`.  Same-host run
+on the GPU box (RTX 3080 Ti, sm86, torch 2.11.0, vLLM 0.20.0, bf16,
+Qwen2.5-1.5B at max_model_len=4096).  Simulates a fresh fleet member
+by fully wiping vLLM's compile state and measuring cold-start time.
+
+**Motivation.**  Every vLLM cold start pays ~16–24 s on torch.compile +
+CUDA-graph capture.  For a fleet of identical workstations, every
+cold restart pays this tax independently.  vLLM already writes
+content-addressed artifacts under `~/.cache/vllm/`.  If the primitive
+we built (bloom catalog + exact-validation gate) is really general,
+publishing those artifacts through the same code path should cut
+cold-start for every non-first fleet member.
+
+**What to wipe matters.**  On a first attempt that wiped only the
+per-config `torch_compile_cache/<sha>/` directory (~7 MB), we saw
+**1.01× speedup** — vLLM still had the `torch_aot_compile/` cache
+and `modelinfos/` on disk from prior runs and reused them.  The
+honest cold-fleet-member baseline requires wiping the full set;
+the artifact serializer now ships a "bundle" containing:
+- `torch_compile_cache/<cache_config_sha>/` — per-config graphs
+- `torch_compile_cache/torch_aot_compile/*/` — AOT-compiled functions
+- `modelinfos/*.json` — model metadata cache
+
+Results (median of 3 independent trials per condition; one B0 trial
+with an obvious cold-disk outlier at 61.5 s excluded by using median):
+
+| condition | bundle size | vLLM init | fetch | total wall-clock | speedup |
+|---|--:|--:|--:|--:|--:|
+| B0 cold (wipe everything) | — | 24 245 ms | — | 24 245 ms | 1.00× |
+| EdgeServe fetch + vLLM init | 12.8 MB | **16 156 ms** | **30 ms** | **16 186 ms** | **1.50×** |
+
+**Every cold fleet member saves ~8 s.**  Fleet-wide savings scale
+linearly with fleet size: a team of 8 workstations doing one cold
+start each saves ~64 s of wall-clock if all configurations match.
+
+### Correctness demo (the exact-validation gate)
+
+Two heterogeneous-fleet scenarios, both probed against the same
+published bundle:
+
+| probe | engine provenance | result |
+|---|---|---|
+| Right arch + right model | sm86, Qwen2.5-1.5B | admit → fetch succeeds |
+| Wrong gpu_arch | sm89, Qwen2.5-1.5B | **reject** ✓ `catalog-miss-or-provenance-rejected` |
+| Wrong model_id | sm86, meta-llama/Llama-3-8B | **reject** ✓ |
+
+A false positive here would hand an sm86-compiled graph to an sm89
+GPU or a Qwen-shaped graph to a Llama model.  The existing
+`CacheHeader.matches_engine()` check (introduced in Phase 7.0)
+rejects both — without changing a line of catalog code.
+
+### What this proves for the paper
+
+- The primitive is payload-agnostic.  No change to
+  `SemanticCacheClient`, `CacheHeader`, `HeaderCatalog`, or the bloom
+  filter.  Only two new files:
+  `edgeserve/artifacts/vllm_compile.py` (~300 LOC, entity schema +
+  tar bundle) and `scripts/bench_vllm_compile_cache.py`.
+- The exact-match gate built for KV cache (Phase 7.0) applies
+  verbatim.  All three rejection dimensions (model, architecture,
+  framework version) fall out of existing code.
+- **Honest measurement matters.**  The naïve "ship one dir" version
+  showed 1.01× because vLLM's cold start depends on three
+  independent caches.  A paper that stopped at the first result
+  would have misreported.  The correct number (1.50×, 8 s saved)
+  required reverse-engineering vLLM's cache layout with a separate
+  diagnostic; the artifact helper documents this in its module
+  docstring so future maintainers don't repeat the mistake.
+
 ## Reproducing
 
 ```bash

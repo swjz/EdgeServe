@@ -619,7 +619,7 @@ Each paper claim maps to a specific experiment. Use this table to track coverage
 | **Differentiator over NIXL: cross-host + no RDMA** | Phase 7.3 NIXL comparison | 🔲 TODO §7.3 | §eval.related |
 | **Primitive generality, case study: embeddings** | Phase E1 Linux v6.12 RAG embedding cache sharing | 🔲 TODO §E1 | §eval.generality |
 | **Primitive generality, case study: tool-call results** | Phase E2 Linux v6.12 dev-tool result cache | 🔲 TODO §E2 | §eval.generality |
-| **Primitive generality, case study: compile artifacts** | Phase E3 vLLM compile-cache / CUDA-graph sharing | 🔲 TODO §E3 | §eval.generality |
+| **Primitive generality, case study: compile artifacts** | Phase E3 vLLM compile-cache / CUDA-graph sharing | ✅ RESULTS §E3 (1.50× cold-start, 8 s saved per fleet member; arch + model rejection passes) | §eval.generality |
 | Semantic discovery extends to VLM visual artifacts | Phase 7.5 VLM asset-cache discovery (optional, broader framing) | 🔲 TODO §7.5 | §eval.multimodal |
 | CDN economics improve at 7B / 32k tokens | Phase 8.1–8.2 scale evaluation | 🔲 deferred | §eval.scale |
 

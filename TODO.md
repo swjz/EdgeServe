@@ -720,7 +720,24 @@ admits (mirrors `test_exact_validation.test_tight_bloom_stress`).
 - RESULTS.md §E2 with fleet-wall-clock figure + hit-rate-by-command
   table + correctness matrix
 
-### E3 — vLLM compile-cache / CUDA-graph sharing 🔲
+### E3 — vLLM compile-cache / CUDA-graph sharing ✅ done (2026-04-28)
+
+`edgeserve/artifacts/vllm_compile.py` + `scripts/bench_vllm_compile_cache.py`
++ `tests/test_vllm_compile_artifact.py` (14 tests).  Full compile-state
+bundle (per-config tcc + torch_aot_compile + modelinfos), 12.8 MB.
+
+Results on RTX 3080 Ti / Qwen2.5-1.5B:
+- B0 cold (wipe all vLLM caches): **24.2 s** median init
+- EdgeServe fetch + vLLM init:    **16.2 s** total (30 ms fetch + 16.2 s init)
+- **1.50× speedup; 8 s saved per cold fleet member**
+- Correctness: wrong-arch (sm89) and wrong-model (Llama) probes both REJECTED
+
+**Lesson recorded in module docstring:** an early attempt shipped only
+the per-config directory (~7 MB) and saw 1.01× speedup — vLLM also
+caches `torch_aot_compile/*/` and `modelinfos/*.json`.  The bundle
+includes all three.
+
+See RESULTS.md §Phase E3.
 
 **Observation:** every vLLM cold start pays ~8.6 s on torch.compile +
 CUDA graph capture.  We've seen this in every probe log, e.g.
